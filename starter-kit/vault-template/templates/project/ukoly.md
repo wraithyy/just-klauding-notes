@@ -1,0 +1,6 @@
+---
+project: {{project}}
+---
+# {{project}} — Úkoly
+
+- [ ]

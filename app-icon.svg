@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="g" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#E14A2E"/>
+      <stop offset="1" stop-color="#B53318"/>
+    </linearGradient>
+  </defs>
+  <!-- macOS squircle tile: ~824px artwork, ~100px margin, ~0.2246 corner radius -->
+  <rect x="100" y="100" width="824" height="824" rx="185" fill="url(#g)"/>
+  <!-- subtle top highlight -->
+  <rect x="100" y="100" width="824" height="412" rx="185" fill="#ffffff" opacity="0.06"/>
+  <!-- JK monogram, larger -->
+  <g transform="translate(315.5,262) scale(2.976)" fill="#FAF8F4">
+    <rect x="0" y="89" width="25" height="79"/>
+    <rect x="36" y="0" width="25" height="168"/>
+    <rect x="71" y="0" width="25" height="168"/>
+    <rect x="107" y="0" width="25" height="79"/>
+    <rect x="107" y="89" width="25" height="79"/>
+  </g>
+</svg>
