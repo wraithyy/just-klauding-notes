@@ -431,16 +431,20 @@ async fn run_note(kind: String, text: String, cont: bool) -> Result<String, Stri
         }
         "ai" => {
             args.extend(base);
-            args.extend(["--permission-mode", "acceptEdits", "--allowedTools",
-                         "Bash(git:*),Bash(date:*)"].iter().map(|s| s.to_string()));
+            args.extend(["--permission-mode", "acceptEdits"].iter().map(|s| s.to_string()));
+            // =form: --allowedTools is variadic and would consume the prompt.
+            args.push("--allowedTools=Bash(git:*),Bash(date:*)".into());
             args.push(text);
         }
         // Vault skills (/meeting, /weekly, …). Slash commands MUST stay enabled
-        // here (no --disable-slash-commands), and skills may write files, so
-        // acceptEdits. `text` is the full command line.
+        // (no --disable-slash-commands). acceptEdits plus an explicit tool allow
+        // list so skills can read transcripts (outside the vault), write notes,
+        // and commit without the interactive prompts that -p can't answer.
         "skill" => {
             args.extend(["-p", "--model", cfg.model.as_str(), "--setting-sources", "project",
                          "--permission-mode", "acceptEdits"].iter().map(|s| s.to_string()));
+            // =form: --allowedTools is variadic and would consume the prompt.
+            args.push("--allowedTools=Read,Edit,Write,Glob,Grep,Bash".into());
             // Some skills (e.g. /meeting) read transcripts outside the vault —
             // grant that dir if it exists.
             // --add-dir is variadic — as a separate token it swallows the
