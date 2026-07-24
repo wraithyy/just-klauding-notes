@@ -443,10 +443,12 @@ async fn run_note(kind: String, text: String, cont: bool) -> Result<String, Stri
                          "--permission-mode", "acceptEdits"].iter().map(|s| s.to_string()));
             // Some skills (e.g. /meeting) read transcripts outside the vault —
             // grant that dir if it exists.
+            // --add-dir is variadic — as a separate token it swallows the
+            // prompt. Use the =form so it stays one token and `text` remains
+            // the positional prompt.
             let transcripts = expand(&cfg.transcripts_dir);
             if transcripts.is_dir() {
-                args.push("--add-dir".into());
-                args.push(transcripts.to_string_lossy().to_string());
+                args.push(format!("--add-dir={}", transcripts.to_string_lossy()));
             }
             args.push(text);
         }
