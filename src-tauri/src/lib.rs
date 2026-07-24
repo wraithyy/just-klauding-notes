@@ -1,7 +1,7 @@
 // Notes GUI backend. All vault IO + `note` claude bridge live here; the
 // frontend never touches the filesystem directly (no fs plugin needed).
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::sync::OnceLock;
 
 use serde::{Deserialize, Serialize};
@@ -452,8 +452,12 @@ async fn run_note(kind: String, text: String, cont: bool) -> Result<String, Stri
         }
         _ => return Err(format!("unknown kind: {kind}")),
     }
+    // No usable stdin when spawned from the GUI; claude treats a slash-command
+    // prompt as needing stdin input and errors otherwise. /dev/null tells it to
+    // skip stdin and just run the command/prompt.
     let out = proc("claude")
         .current_dir(vault())
+        .stdin(Stdio::null())
         .args(&args)
         .output()
         .map_err(|e| format!("spawn claude failed: {e}"))?;
