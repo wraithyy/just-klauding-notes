@@ -2,7 +2,20 @@ import { invoke } from "@tauri-apps/api/core";
 
 export type Entry = { path: string; name: string; is_dir: boolean };
 export type Hit = { path: string; line: number; text: string };
-export type Task = { file: string; line: number; text: string; done: boolean };
+export type Task = {
+  file: string;
+  line: number;
+  text: string;
+  done: boolean;
+  done_at: string | null;
+};
+
+// Local calendar date, ISO. Dates live in the vault as `✅ YYYY-MM-DD`, so they
+// must follow the user's timezone, not UTC.
+export const isoDate = (d = new Date()) =>
+  `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+export const isoDaysAgo = (days: number) =>
+  isoDate(new Date(Date.now() - days * 864e5));
 
 export const readTree = () => invoke<Entry[]>("read_tree");
 export const grep = (query: string) => invoke<Hit[]>("grep", { query });
@@ -18,7 +31,7 @@ export const gitStatus = () => invoke<number>("git_status");
 export const gitSync = () => invoke<string>("git_sync");
 export const listTasks = () => invoke<Task[]>("list_tasks");
 export const toggleTask = (file: string, line: number) =>
-  invoke<boolean>("toggle_task", { file, line });
+  invoke<boolean>("toggle_task", { file, line, today: isoDate() });
 
 export type EnvCheck = {
   claude: boolean;
@@ -41,6 +54,7 @@ export type Config = {
   tasks_file: string;
   transcripts_dir: string;
   model: string;
+  archive_days: number;
   skills: Skill[];
 };
 export const getConfig = () => invoke<Config>("get_config");

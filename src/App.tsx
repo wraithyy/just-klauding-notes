@@ -4,6 +4,7 @@ import { markdown } from "@codemirror/lang-markdown";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import { getVersion } from "@tauri-apps/api/app";
 import { listen } from "@tauri-apps/api/event";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import {
@@ -27,6 +28,8 @@ import {
   gitSync,
   listTasks,
   toggleTask,
+  isoDate,
+  isoDaysAgo,
   inboxName,
 } from "./api";
 import logo from "./assets/logo.svg";
@@ -45,6 +48,7 @@ const DEFAULT_CONFIG: Config = {
   tasks_file: "ukoly.md",
   transcripts_dir: "~/Documents/transcripts",
   model: "sonnet",
+  archive_days: 7,
   skills: [
     { label: "Meeting summary", cmd: "/meeting", arg: false },
     { label: "Weekly digest", cmd: "/weekly", arg: false },
@@ -64,6 +68,15 @@ function resolveLink(fromRel: string, href: string): string | null {
     else if (p !== ".") dir.push(p);
   }
   return dir.join("/");
+}
+
+// Version straight from tauri.conf.json — one source of truth, no duplication.
+function useAppVersion() {
+  const [v, setV] = useState("");
+  useEffect(() => {
+    getVersion().then(setV).catch(() => {});
+  }, []);
+  return v;
 }
 
 function usePrefersDark() {
@@ -307,7 +320,7 @@ export default function App() {
             onConsumed={() => setChatCmd(null)}
           />
         )}
-        {view === "tasks" && <Tasks onOpen={openNote} />}
+        {view === "tasks" && <Tasks onOpen={openNote} archiveDays={cfg.archive_days} />}
       </main>
       </div>
 
@@ -542,11 +555,13 @@ function Editor({
     if (/^\s*- \[[ xX]\]/.test(l)) acc.push(i);
     return acc;
   }, []);
+  // Same `✅ <date>` stamping as the tasks view, so both paths agree.
   const flip = (i: number) => {
     const lines = body.split("\n");
-    lines[i] = lines[i].includes("- [ ]")
-      ? lines[i].replace("- [ ]", "- [x]")
-      : lines[i].replace(/- \[[xX]\]/, "- [ ]");
+    const l = lines[i];
+    lines[i] = l.includes("- [ ]")
+      ? l.replace("- [ ]", "- [x]") + (/✅\s*\d{4}-\d{2}-\d{2}/.test(l) ? "" : ` ✅ ${isoDate()}`)
+      : l.replace(/- \[[xX]\]/, "- [ ]").replace(/\s*✅\s*\d{4}-\d{2}-\d{2}\s*$/, "");
     onChange(lines.join("\n"));
   };
   // Checkboxes render in the same order as taskLines; a per-render counter maps
@@ -975,34 +990,83 @@ function slugify(s: string): string {
 
 // Global task list: every `- [ ]` across projekty/*/ukoly.md, grouped by
 // project. Ticking writes the flip back to the file.
-function Tasks({ onOpen }: { onOpen: (rel: string) => void }) {
+const taskKey = (t: Task) => `${t.file}:${t.line}`;
+
+function Tasks({
+  onOpen,
+  archiveDays,
+}: {
+  onOpen: (rel: string) => void;
+  archiveDays: number;
+}) {
   const [tasks, setTasks] = useState<Task[]>([]);
   const [loading, setLoading] = useState(true);
+  const [showDone, setShowDone] = useState(false);
+  // Ticked in this session: stays put in its project group so the list doesn't
+  // jump under the cursor. Moves down to Done on the next load.
+  const [sticky, setSticky] = useState<Set<string>>(new Set());
   const load = () => {
-    setLoading(true);
-    listTasks().then(setTasks).catch(console.error).finally(() => setLoading(false));
+    listTasks()
+      .then((ts) => {
+        setTasks(ts);
+        setSticky(new Set());
+      })
+      .catch(console.error)
+      .finally(() => setLoading(false));
   };
   useEffect(load, []);
-  const groups = useMemo(() => {
+
+  // Open tasks grouped by project; recently done ones collected separately.
+  // Anything finished before the cutoff (or undated — it predates stamping)
+  // stays in the file but drops out of the list, so Done can't grow forever.
+  const { groups, done, hidden } = useMemo(() => {
+    const cutoff = isoDaysAgo(archiveDays);
     const m = new Map<string, Task[]>();
+    const done: Task[] = [];
+    let hidden = 0;
     for (const t of tasks) {
+      if (t.done && !sticky.has(taskKey(t))) {
+        if (!t.done_at || t.done_at < cutoff) hidden++;
+        else done.push(t);
+        continue;
+      }
       const proj = t.file.split("/")[1] ?? t.file;
       if (!m.has(proj)) m.set(proj, []);
       m.get(proj)!.push(t);
     }
-    return [...m.entries()];
-  }, [tasks]);
+    return { groups: [...m.entries()], done, hidden };
+  }, [tasks, sticky, archiveDays]);
+
+  // Optimistic: flip locally, no reload, so nothing re-mounts on tick.
   const toggle = async (t: Task) => {
-    await toggleTask(t.file, t.line);
-    load();
+    const k = taskKey(t);
+    const set = (patch: Partial<Task>) =>
+      setTasks((prev) => prev.map((x) => (taskKey(x) === k ? { ...x, ...patch } : x)));
+    set({ done: !t.done, done_at: t.done ? null : isoDate() });
+    setSticky((prev) => new Set(prev).add(k));
+    try {
+      await toggleTask(t.file, t.line);
+    } catch (e) {
+      console.error("toggle_task failed:", e);
+      set({ done: t.done, done_at: t.done_at });
+    }
   };
+
   const openCount = tasks.filter((t) => !t.done).length;
+  const row = (t: Task) => (
+    <label key={taskKey(t)} className={"task" + (t.done ? " done" : "")}>
+      <input type="checkbox" checked={t.done} onChange={() => toggle(t)} />
+      <span>{t.text}</span>
+      {t.done && t.done_at && <span className="task-date">{t.done_at}</span>}
+    </label>
+  );
 
   return (
     <div className="tasks">
       <div className="tasks-head">
         <span>
-          {openCount} open · {groups.length} project(s)
+          {openCount} open · {groups.length} project(s) · {done.length} done
+          {hidden > 0 && ` · ${hidden} archived`}
         </span>
         <button onClick={load}>Refresh</button>
       </div>
@@ -1014,14 +1078,17 @@ function Tasks({ onOpen }: { onOpen: (rel: string) => void }) {
             <div className="task-proj" onClick={() => onOpen(ts[0].file)}>
               {proj}
             </div>
-            {ts.map((t) => (
-              <label key={t.file + t.line} className={"task" + (t.done ? " done" : "")}>
-                <input type="checkbox" checked={t.done} onChange={() => toggle(t)} />
-                <span>{t.text}</span>
-              </label>
-            ))}
+            {ts.map(row)}
           </div>
         ))}
+        {done.length > 0 && (
+          <div className="task-group task-done-group">
+            <button className="task-done-toggle" onClick={() => setShowDone((v) => !v)}>
+              {showDone ? "▾" : "▸"} Done, last {archiveDays}d ({done.length})
+            </button>
+            {showDone && done.map(row)}
+          </div>
+        )}
       </div>
     </div>
   );
@@ -1142,7 +1209,10 @@ function Settings({
   return (
     <div className="cmdk-overlay" onClick={onClose}>
       <div className="cmdk settings" onClick={(e) => e.stopPropagation()}>
-        <h2 className="gs-title">Settings</h2>
+        <div className="set-title">
+          <h2 className="gs-title">Settings</h2>
+          <span className="set-version">v{useAppVersion()}</span>
+        </div>
         <div className="set-grid">
           <label className="set-row">
             <span>Vault</span>
@@ -1164,6 +1234,16 @@ function Settings({
           {field("inbox_dir", "Inbox dir")}
           {field("tasks_file", "Tasks file")}
           {field("transcripts_dir", "Transcripts dir")}
+          <label className="set-row">
+            <span>Keep done tasks (days)</span>
+            <input
+              className="target-input"
+              type="number"
+              min={0}
+              value={d.archive_days}
+              onChange={(e) => up({ archive_days: Math.max(0, Number(e.target.value) || 0) })}
+            />
+          </label>
           <label className="set-row">
             <span>Hidden folders</span>
             <input

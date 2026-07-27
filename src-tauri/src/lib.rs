@@ -40,6 +40,7 @@ struct Config {
     tasks_file: Option<String>,
     transcripts_dir: Option<String>,
     model: Option<String>,
+    archive_days: Option<u32>,
     skills: Option<Vec<Skill>>,
 }
 
@@ -55,6 +56,7 @@ struct ResolvedConfig {
     tasks_file: String,
     transcripts_dir: String,
     model: String,
+    archive_days: u32,
     skills: Vec<Skill>,
 }
 
@@ -92,6 +94,7 @@ fn resolved() -> ResolvedConfig {
         tasks_file: s(c.tasks_file, "ukoly.md"),
         transcripts_dir: s(c.transcripts_dir, "~/Documents/transcripts"),
         model: s(c.model, "sonnet"),
+        archive_days: c.archive_days.unwrap_or(7),
         skills: c.skills.unwrap_or_else(default_skills),
     }
 }
@@ -351,6 +354,40 @@ struct Task {
     line: u32,
     text: String,
     done: bool,
+    done_at: Option<String>,
+}
+
+// Completion stamp appended to a ticked line: `- [x] foo ✅ 2026-07-27`.
+// Split a task line's body into (text, done_at).
+fn split_stamp(body: &str) -> (String, Option<String>) {
+    match body.rsplit_once('✅') {
+        Some((head, date)) => {
+            let date = date.trim();
+            let looks_iso = date.len() == 10 && date.as_bytes()[4] == b'-';
+            if looks_iso && date.chars().all(|c| c.is_ascii_digit() || c == '-') {
+                return (head.trim_end().to_string(), Some(date.to_string()));
+            }
+            (body.trim().to_string(), None)
+        }
+        None => (body.trim().to_string(), None),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::split_stamp;
+
+    #[test]
+    fn stamp_parsing() {
+        assert_eq!(split_stamp("koupit mléko"), ("koupit mléko".into(), None));
+        assert_eq!(
+            split_stamp("koupit mléko ✅ 2026-07-27"),
+            ("koupit mléko".into(), Some("2026-07-27".into()))
+        );
+        // A bare emoji or junk date is text, not a stamp.
+        assert_eq!(split_stamp("hotovo ✅"), ("hotovo ✅".into(), None));
+        assert_eq!(split_stamp("✅ zítra"), ("✅ zítra".into(), None));
+    }
 }
 
 // Every checkbox task across projekty/*/ukoly.md.
@@ -375,20 +412,22 @@ async fn list_tasks() -> Result<Vec<Task>, String> {
             let line = it.next()?.parse().ok()?;
             let raw = it.next()?.trim();
             let done = raw.starts_with("- [x]") || raw.starts_with("- [X]");
-            let clean = raw
+            let body = raw
                 .trim_start_matches("- [ ]")
                 .trim_start_matches("- [x]")
                 .trim_start_matches("- [X]")
-                .trim()
-                .to_string();
-            Some(Task { file, line, text: clean, done })
+                .trim();
+            let (text, done_at) = split_stamp(body);
+            Some(Task { file, line, text, done, done_at })
         })
         .collect())
 }
 
-// Flip a single checkbox and write the file back.
+// Flip a single checkbox and write the file back. Ticking stamps the line with
+// `✅ <today>` (date comes from the frontend so it is in the user's timezone);
+// unticking strips the stamp again.
 #[tauri::command]
-fn toggle_task(file: String, line: u32) -> Result<bool, String> {
+fn toggle_task(file: String, line: u32, today: String) -> Result<bool, String> {
     let p = resolve(&file)?;
     let content = std::fs::read_to_string(&p).map_err(|e| e.to_string())?;
     let mut lines: Vec<String> = content.lines().map(String::from).collect();
@@ -398,9 +437,15 @@ fn toggle_task(file: String, line: u32) -> Result<bool, String> {
     let done;
     if l.contains("- [ ]") {
         *l = l.replacen("- [ ]", "- [x]", 1);
+        if !l.contains('✅') {
+            l.push_str(&format!(" ✅ {}", today.trim()));
+        }
         done = true;
     } else if l.contains("- [x]") || l.contains("- [X]") {
         *l = l.replacen("- [x]", "- [ ]", 1).replacen("- [X]", "- [ ]", 1);
+        if let Some((head, _)) = l.rsplit_once('✅') {
+            *l = head.trim_end().to_string();
+        }
         done = false;
     } else {
         return Err("not a task line".into());
