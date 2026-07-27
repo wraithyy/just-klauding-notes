@@ -34,10 +34,17 @@ The app drives Claude Code against your vault — you install and log in yoursel
 
 ## Install
 
-Download the latest `.dmg` from [**Releases**](../../releases), open it, and
+```sh
+brew install --cask wraithyy/tap/just-klauding-notes
+```
+
+Or download the latest `.dmg` from [**Releases**](../../releases), open it, and
 drag the app to Applications.
 
 > Unsigned build: first launch → right-click the app → **Open** → **Open**.
+> The cask strips the quarantine flag for you.
+
+The installed version is shown in **⚙ Settings**.
 
 On first run a **Getting Started** dialog checks your setup and lets you pick
 your vault folder.
