@@ -40,6 +40,8 @@ struct Config {
     tasks_file: Option<String>,
     task_glob: Option<String>,
     transcripts_dir: Option<String>,
+    attachments_dir: Option<String>,
+    image_width: Option<String>,
     model: Option<String>,
     note_language: Option<String>,
     archive_days: Option<u32>,
@@ -58,6 +60,8 @@ struct ResolvedConfig {
     tasks_file: String,
     task_glob: String,
     transcripts_dir: String,
+    attachments_dir: String,
+    image_width: String,
     model: String,
     note_language: String,
     archive_days: u32,
@@ -168,6 +172,10 @@ fn resolved_from(c: Config, v: &Path) -> ResolvedConfig {
         inbox_dir: s(c.inbox_dir, &detect(INBOX_DIRS, "inbox")),
         tasks_file,
         transcripts_dir: s(c.transcripts_dir, "~/Documents/transcripts"),
+        // Per-note folder for dropped files, relative to the note itself.
+        attachments_dir: s(c.attachments_dir, "assets"),
+        // Half the reading column by default; `![alt|300](x.png)` overrides it.
+        image_width: s(c.image_width, "50%"),
         model: s(c.model, "sonnet"),
         // Empty = say nothing and let Claude mirror the input language.
         note_language: c.note_language.unwrap_or_default(),
@@ -580,6 +588,26 @@ mod tests {
     }
 
     #[test]
+    fn scheme_detection() {
+        use super::has_scheme;
+        assert!(has_scheme("https://example.com"));
+        assert!(has_scheme("mailto:a@b.cz"));
+        assert!(!has_scheme("assets/report.docx"));
+        assert!(!has_scheme("./notes/a.md"));
+        assert!(!has_scheme("C:/tmp/x.txt"));
+    }
+
+    #[test]
+    fn attachment_slug() {
+        use super::slug;
+        assert_eq!(slug("Screenshot 2026-07-28"), "screenshot-2026-07-28");
+        assert_eq!(slug("Nabídka — Žížala v1"), "nabidka-zizala-v1");
+        assert_eq!(slug("!!!"), "file");
+        // Path separators and spaces can't survive into a filename.
+        assert_eq!(slug("../../etc/passwd"), "etc-passwd");
+    }
+
+    #[test]
     fn grouping() {
         assert_eq!(task_group("projekty/acme/ukoly.md", "projekty"), "acme");
         assert_eq!(task_group("projekty/a/b/ukoly.md", "projekty"), "a/b");
@@ -632,6 +660,183 @@ async fn list_tasks() -> Result<Vec<Task>, String> {
             Some(Task { file, line, text, done, done_at, group })
         })
         .collect())
+}
+
+// Max size inlined into the preview. Bigger images stay as a link — base64 in a
+// webview is ~1.4x the file, and nothing good comes of a 50 MB <img>.
+const MAX_INLINE_BYTES: u64 = 20 * 1024 * 1024;
+
+// Read a vault image as a data URI. Going through a command instead of the
+// asset:// protocol keeps this working the same in dev and release, with no
+// protocol scope or CSP to get wrong.
+#[tauri::command]
+fn read_asset(rel: String) -> Result<String, String> {
+    use base64::Engine;
+    let p = resolve(&rel)?;
+    let meta = std::fs::metadata(&p).map_err(|e| e.to_string())?;
+    if meta.len() > MAX_INLINE_BYTES {
+        return Err(format!("too large to inline: {} bytes", meta.len()));
+    }
+    let mime = match p
+        .extension()
+        .map(|e| e.to_string_lossy().to_lowercase())
+        .unwrap_or_default()
+        .as_str()
+    {
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        "avif" => "image/avif",
+        "svg" => "image/svg+xml",
+        "bmp" => "image/bmp",
+        "heic" | "heif" => "image/heic",
+        other => return Err(format!("not an image: .{other}")),
+    };
+    let bytes = std::fs::read(&p).map_err(|e| e.to_string())?;
+    let b64 = base64::engine::general_purpose::STANDARD.encode(bytes);
+    Ok(format!("data:{mime};base64,{b64}"))
+}
+
+// Open a URL in the browser, or a file in whatever app owns its type. Vault
+// paths are resolved (and confined) first; anything with a scheme is treated as
+// a URL. Used for the links the preview can't handle itself.
+#[tauri::command]
+fn open_external(target: String) -> Result<(), String> {
+    if has_scheme(&target) {
+        tauri_plugin_opener::open_url(target, None::<&str>).map_err(|e| e.to_string())
+    } else {
+        let p = resolve(&target)?;
+        if !p.exists() {
+            return Err(format!("not found: {target}"));
+        }
+        tauri_plugin_opener::open_path(p.to_string_lossy().to_string(), None::<&str>)
+            .map_err(|e| e.to_string())
+    }
+}
+
+// `scheme:` prefix check. Single-letter prefixes are excluded so a Windows-style
+// `C:\…` (or a stray `a:`) isn't mistaken for a URL.
+fn has_scheme(s: &str) -> bool {
+    match s.find(':') {
+        Some(i) if i > 1 => s[..i].chars().all(|c| c.is_ascii_alphanumeric() || c == '+' || c == '-'),
+        _ => false,
+    }
+}
+
+// Delete attachments a note no longer links to. Only touches files inside that
+// note's attachments folder, and only when nothing else in the vault mentions
+// the filename — a shared image stays put. Returns what was deleted.
+#[tauri::command]
+fn prune_attachments(note: String, removed: Vec<String>) -> Result<Vec<String>, String> {
+    let r = resolved();
+    let note_dir = Path::new(&note)
+        .parent()
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_default();
+    let prefix = format!("{}/", r.attachments_dir);
+    let mut deleted = Vec::new();
+    for rel in removed {
+        if !rel.starts_with(&prefix) || rel.contains("..") {
+            continue;
+        }
+        let name = match Path::new(&rel).file_name() {
+            Some(n) => n.to_string_lossy().to_string(),
+            None => continue,
+        };
+        let vault_rel = if note_dir.is_empty() { rel.clone() } else { format!("{note_dir}/{rel}") };
+        let abs = resolve(&vault_rel)?;
+        if !abs.is_file() {
+            continue;
+        }
+        // Still referenced anywhere (including this note, if it came back)? Keep it.
+        let hits = proc("rg")
+            .current_dir(vault())
+            .args(["--files-with-matches", "--fixed-strings", "-g", "*.md", &name])
+            .output()
+            .map_err(|e| format!("rg failed: {e}"))?;
+        if !String::from_utf8_lossy(&hits.stdout).trim().is_empty() {
+            continue;
+        }
+        std::fs::remove_file(&abs).map_err(|e| e.to_string())?;
+        deleted.push(vault_rel);
+        // Tidy up the folder once its last attachment is gone.
+        if let Some(dir) = abs.parent() {
+            let _ = std::fs::remove_dir(dir);
+        }
+    }
+    Ok(deleted)
+}
+
+// Copy a dropped file into the vault next to the note that received it, under
+// the configured attachments folder. Returns the path relative to the note, i.e.
+// what goes inside the markdown link. Never overwrites: a clashing name gets
+// `-1`, `-2`, … appended.
+#[tauri::command]
+fn attach_file(note: String, src: String) -> Result<String, String> {
+    let src = PathBuf::from(&src);
+    if !src.is_file() {
+        return Err(format!("not a file: {}", src.to_string_lossy()));
+    }
+    let stem = src.file_stem().map(|s| slug(&s.to_string_lossy())).unwrap_or_else(|| "file".into());
+    let ext = src
+        .extension()
+        .map(|e| format!(".{}", e.to_string_lossy().to_lowercase()))
+        .unwrap_or_default();
+
+    let r = resolved();
+    let note_dir = Path::new(&note).parent().map(|p| p.to_string_lossy().to_string()).unwrap_or_default();
+    let rel_dir = if note_dir.is_empty() {
+        r.attachments_dir.clone()
+    } else {
+        format!("{note_dir}/{}", r.attachments_dir)
+    };
+    let abs_dir = resolve(&rel_dir)?;
+    std::fs::create_dir_all(&abs_dir).map_err(|e| e.to_string())?;
+
+    let mut name = format!("{stem}{ext}");
+    for n in 1.. {
+        if !abs_dir.join(&name).exists() {
+            break;
+        }
+        name = format!("{stem}-{n}{ext}");
+    }
+    std::fs::copy(&src, abs_dir.join(&name)).map_err(|e| e.to_string())?;
+    Ok(format!("{}/{}", r.attachments_dir, name))
+}
+
+// Filename-safe ascii slug: strip accents' diacritics crudely, keep word chars.
+fn slug(s: &str) -> String {
+    let out: String = s
+        .to_lowercase()
+        .chars()
+        .map(|c| match c {
+            'á' | 'à' | 'â' | 'ä' | 'å' => 'a',
+            'č' | 'ç' => 'c',
+            'ď' => 'd',
+            'é' | 'è' | 'ě' | 'ê' | 'ë' => 'e',
+            'í' | 'ì' | 'î' | 'ï' => 'i',
+            'ň' | 'ñ' => 'n',
+            'ó' | 'ò' | 'ô' | 'ö' => 'o',
+            'ř' => 'r',
+            'š' => 's',
+            'ť' => 't',
+            'ú' | 'ù' | 'û' | 'ü' | 'ů' => 'u',
+            'ý' | 'ÿ' => 'y',
+            'ž' => 'z',
+            c if c.is_ascii_alphanumeric() || c == '-' || c == '_' => c.to_ascii_lowercase(),
+            _ => '-',
+        })
+        .collect();
+    let out = out.trim_matches('-').to_string();
+    // Collapse runs of dashes.
+    let mut s = String::with_capacity(out.len());
+    for c in out.chars() {
+        if c != '-' || !s.ends_with('-') {
+            s.push(c);
+        }
+    }
+    if s.is_empty() { "file".into() } else { s }
 }
 
 // Flip a single checkbox and write the file back. Ticking stamps the line with
@@ -814,7 +1019,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             read_tree, grep, read_note, write_note, move_note, run_note,
-            delete_note, git_status, git_sync, list_tasks, toggle_task, check_env, detect_config,
+            delete_note, git_status, git_sync, list_tasks, toggle_task, check_env, detect_config, attach_file, read_asset, open_external, prune_attachments,
             set_vault, get_config, save_config
         ])
         .run(tauri::generate_context!())

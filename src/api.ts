@@ -29,6 +29,16 @@ export const moveNote = (from: string, to: string) =>
 export const deleteNote = (rel: string) => invoke<void>("delete_note", { rel });
 export const runNote = (kind: string, text: string, cont = false) =>
   invoke<string>("run_note", { kind, text, cont });
+// Copies `src` next to `note` and returns the path to put in the markdown link.
+export const attachFile = (note: string, src: string) =>
+  invoke<string>("attach_file", { note, src });
+// Vault image as a data URI (see read_asset: 20 MB cap, images only).
+export const readAsset = (rel: string) => invoke<string>("read_asset", { rel });
+// URL → browser, vault file → whatever app owns the type.
+export const openExternal = (target: string) => invoke<void>("open_external", { target });
+// Deletes attachments the note stopped linking to; returns what went.
+export const pruneAttachments = (note: string, removed: string[]) =>
+  invoke<string[]>("prune_attachments", { note, removed });
 export const gitStatus = () => invoke<number>("git_status");
 export const gitSync = () => invoke<string>("git_sync");
 export const listTasks = () => invoke<Task[]>("list_tasks");
@@ -56,6 +66,10 @@ export type Config = {
   tasks_file: string;
   task_glob: string;
   transcripts_dir: string;
+  // Per-note folder dropped files are copied into, relative to the note.
+  attachments_dir: string;
+  // Default max width for images in the preview, any CSS length (e.g. "50%").
+  image_width: string;
   model: string;
   // Language Claude writes note content in; empty = mirror the request.
   note_language: string;

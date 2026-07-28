@@ -24,6 +24,7 @@ follow the same rule.
 - Meeting notes: `projekty/<slug>/schuzky/YYYY-MM-DD-nazev.md` (ascii slug filename). Frontmatter: `date`, `type: meeting`, `firma`, `summary`, `project`, `participants`.
 - Meetings for project X = list `projekty/<slug>/schuzky/`. Non-project meetings live in `poznamky/`.
 - Standard markdown links (relative, URL-encoded). No wikilinks, no dataview, no Templater.
+- Images and attached files live in an `assets/` folder next to the note that links them; link them relatively (`![shot](assets/shot.png)`). The app puts dropped files there.
 - Folder/file names for new project content: lowercase ascii slugs.
 - New project = copy `templates/project/` scaffold (use /new-project).
 - Ticking a task stamps it `- [x] … ✅ YYYY-MM-DD`; keep that format when ticking by hand.

@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import CodeMirror from "@uiw/react-codemirror";
+import CodeMirror, { type ReactCodeMirrorRef } from "@uiw/react-codemirror";
 import { markdown } from "@codemirror/lang-markdown";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -7,6 +7,7 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { getVersion } from "@tauri-apps/api/app";
 import { listen } from "@tauri-apps/api/event";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
+import { getCurrentWebview } from "@tauri-apps/api/webview";
 import {
   type Entry,
   type Hit,
@@ -25,6 +26,10 @@ import {
   moveNote,
   deleteNote,
   runNote,
+  attachFile,
+  readAsset,
+  openExternal,
+  pruneAttachments,
   gitStatus,
   gitSync,
   listTasks,
@@ -38,17 +43,83 @@ import "./App.css";
 
 type Msg = { role: "user" | "claude"; text: string };
 
+// Join a vault-relative path against the note it appears in. A leading `/`
+// means vault root; `.`/`..` segments are collapsed.
+function joinRel(fromRel: string, target: string): string {
+  const dir = target.startsWith("/") ? [] : fromRel.split("/").slice(0, -1);
+  for (const p of target.split("/")) {
+    if (p === "..") dir.pop();
+    else if (p !== "." && p !== "") dir.push(p);
+  }
+  return dir.join("/");
+}
+
 // Resolve a relative md link against the note it lives in. Returns null for
 // external/non-note links (left to default handling).
 function resolveLink(fromRel: string, href: string): string | null {
   const clean = decodeURIComponent(href.split("#")[0]);
   if (/^[a-z]+:\/\//i.test(href) || !clean.endsWith(".md")) return null;
-  const dir = fromRel.split("/").slice(0, -1);
-  for (const p of clean.split("/")) {
-    if (p === "..") dir.pop();
-    else if (p !== ".") dir.push(p);
-  }
-  return dir.join("/");
+  return joinRel(fromRel, clean);
+}
+
+const IMAGE_EXT = /\.(png|jpe?g|gif|webp|avif|svg|bmp|heic)$/i;
+
+// Obsidian-style size hint in the alt text: `![diagram|300](x.png)` or
+// `![shot|60%](x.png)`. A bare number means pixels.
+function splitAlt(alt: string): { alt: string; width?: string } {
+  const m = /^(.*)\|\s*(\d+%?|\d+px)\s*$/.exec(alt);
+  if (!m) return { alt };
+  const w = m[2];
+  return { alt: m[1].trim(), width: /^\d+$/.test(w) ? `${w}px` : w };
+}
+
+// Vault images are read through a command and inlined as data URIs — no asset
+// protocol, so dev and release behave identically. Cached per path because
+// react-markdown re-renders the whole tree on every keystroke.
+const assetCache = new Map<string, string>();
+
+function VaultImage({
+  rel,
+  alt,
+  width,
+}: {
+  rel: string;
+  alt: string;
+  width?: string;
+}) {
+  const [uri, setUri] = useState(() => assetCache.get(rel));
+  const [failed, setFailed] = useState(false);
+  useEffect(() => {
+    const hit = assetCache.get(rel);
+    if (hit) {
+      setUri(hit);
+      setFailed(false);
+      return;
+    }
+    let live = true;
+    setUri(undefined);
+    setFailed(false);
+    readAsset(rel)
+      .then((u) => {
+        assetCache.set(rel, u);
+        if (live) setUri(u);
+      })
+      .catch(() => live && setFailed(true));
+    return () => {
+      live = false;
+    };
+  }, [rel]);
+  if (failed) return <span className="img-missing">{alt || rel} — not found</span>;
+  if (!uri) return <span className="img-loading" />;
+  return <img src={uri} alt={alt} style={width ? { maxWidth: width } : undefined} />;
+}
+
+// Every link/image target in a note, decoded. Used to spot attachments the note
+// stopped referencing.
+function linkTargets(md: string): string[] {
+  return [...md.matchAll(/!?\[[^\]]*\]\(([^)\s]+)\)/g)].map((m) =>
+    decodeURIComponent(m[1]),
+  );
 }
 
 // Version straight from tauri.conf.json — one source of truth, no duplication.
@@ -119,7 +190,13 @@ export default function App() {
   }, [open]);
   // Reopen the last note on launch.
   useEffect(() => {
-    if (open) readNote(open).then(setBody).catch(() => setOpen(null));
+    if (open)
+      readNote(open)
+        .then((text) => {
+          savedBody.current = text;
+          setBody(text);
+        })
+        .catch(() => setOpen(null));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -172,7 +249,9 @@ export default function App() {
   const openNote = async (rel: string) => {
     setOpen(rel);
     setView("editor");
-    setBody(await readNote(rel));
+    const text = await readNote(rel);
+    savedBody.current = text;
+    setBody(text);
   };
 
   // Cmd-K = claude palette, Cmd-P = quick open.
@@ -206,11 +285,27 @@ export default function App() {
 
   // Debounced autosave; autosync launchd commits every 30 min.
   const saveTimer = useRef<number | undefined>(undefined);
+  // Last content written to disk, so a save can tell what links disappeared.
+  const savedBody = useRef("");
   const onChange = (v: string) => {
     setBody(v);
     if (!open) return;
     clearTimeout(saveTimer.current);
-    saveTimer.current = window.setTimeout(() => writeNote(open, v), 600);
+    saveTimer.current = window.setTimeout(async () => {
+      const before = savedBody.current;
+      await writeNote(open, v);
+      savedBody.current = v;
+      // Attachment removed from the note → remove the file too (the backend
+      // keeps anything still referenced elsewhere in the vault).
+      const kept = new Set(linkTargets(v));
+      const gone = linkTargets(before).filter((t) => !kept.has(t));
+      if (!gone.length) return;
+      try {
+        if ((await pruneAttachments(open, gone)).length) refresh();
+      } catch (e) {
+        console.error("prune_attachments failed:", e);
+      }
+    }, 600);
   };
 
   async function runTriage() {
@@ -284,6 +379,7 @@ export default function App() {
             open={open}
             body={body}
             dark={dark}
+            imageWidth={cfg.image_width}
             onChange={onChange}
             onDelete={onDelete}
             onOpenLink={(href) => {
@@ -516,6 +612,7 @@ function Editor({
   open,
   body,
   dark,
+  imageWidth,
   onChange,
   onDelete,
   onOpenLink,
@@ -523,14 +620,67 @@ function Editor({
   open: string | null;
   body: string;
   dark: boolean;
+  imageWidth: string;
   onChange: (v: string) => void;
   onDelete: () => void;
   onOpenLink: (href: string) => void;
 }) {
   const [editing, setEditing] = useState(false);
+  const [dropping, setDropping] = useState(false);
   useEffect(() => {
     setEditing(false);
   }, [open]);
+
+  // The drop listener lives for as long as the note does, so it reads the body
+  // and change handler through refs instead of closing over stale ones.
+  const bodyRef = useRef(body);
+  bodyRef.current = body;
+  const changeRef = useRef(onChange);
+  changeRef.current = onChange;
+  const cm = useRef<ReactCodeMirrorRef>(null);
+
+  // Insert at the caret when the editor is open (CodeMirror owns the document
+  // then, so go through its transaction API); otherwise append to the end.
+  const insert = (text: string) => {
+    const view = cm.current?.view;
+    if (view) {
+      const { from, to } = view.state.selection.main;
+      const pad = from > 0 && view.state.doc.sliceString(from - 1, from) !== "\n" ? "\n" : "";
+      view.dispatch({
+        changes: { from, to, insert: pad + text + "\n" },
+        selection: { anchor: from + pad.length + text.length + 1 },
+      });
+      view.focus();
+      return;
+    }
+    changeRef.current(bodyRef.current.replace(/\s*$/, "") + "\n\n" + text + "\n");
+  };
+
+  // Dropped files are copied next to the note and linked into it: images inline,
+  // everything else as a plain link (the preview gives those a file-type icon).
+  useEffect(() => {
+    if (!open) return;
+    const un = getCurrentWebview().onDragDropEvent(async (e) => {
+      if (e.payload.type === "enter" || e.payload.type === "over") return setDropping(true);
+      if (e.payload.type === "leave") return setDropping(false);
+      setDropping(false);
+      const added: string[] = [];
+      for (const path of e.payload.paths) {
+        try {
+          const rel = await attachFile(open, path);
+          const name = path.split("/").pop() ?? rel;
+          added.push(IMAGE_EXT.test(rel) ? `![${name}](${rel})` : `[${name}](${rel})`);
+        } catch (err) {
+          console.error("attach_file failed:", path, err);
+        }
+      }
+      if (added.length) insert(added.join("\n"));
+    });
+    return () => {
+      un.then((f) => f());
+    };
+  }, [open]);
+
   if (!open) return <div className="empty">Pick a note.</div>;
 
   const { meta, content } = parseFrontmatter(body);
@@ -554,7 +704,7 @@ function Editor({
   let taskIdx = 0;
 
   return (
-    <div className="editor">
+    <div className={"editor" + (dropping ? " dropping" : "")}>
       <div className="editor-bar">
         <span className="path">{open}</span>
         <div className="editor-actions">
@@ -571,6 +721,7 @@ function Editor({
       </div>
       {editing ? (
         <CodeMirror
+          ref={cm}
           value={body}
           height="100%"
           className="cm-pane"
@@ -579,7 +730,10 @@ function Editor({
           theme={dark ? "dark" : "light"}
         />
       ) : (
-        <div className="preview markdown">
+        <div
+          className="preview markdown"
+          style={{ "--img-w": imageWidth } as React.CSSProperties}
+        >
           {meta.length > 0 && (
             <div className="fm-card">
               {meta.map(([k, v]) =>
@@ -598,16 +752,32 @@ function Editor({
               a: ({ href, children }) => (
                 <a
                   href={href}
+                  className={href && !resolveLinkable(href) ? "ext" : undefined}
                   onClick={(e) => {
-                    if (href && resolveLinkable(href)) {
-                      e.preventDefault();
-                      onOpenLink(href);
-                    }
+                    if (!href) return;
+                    e.preventDefault();
+                    if (resolveLinkable(href)) return onOpenLink(href);
+                    // Anything else leaves the app: URLs to the browser, vault
+                    // files to their default app.
+                    const target = /^[a-z][a-z0-9+-]*:/i.test(href)
+                      ? href
+                      : joinRel(open, decodeURIComponent(href.split("#")[0]));
+                    openExternal(target).catch((err) => console.error("open failed:", err));
                   }}
                 >
                   {children}
                 </a>
               ),
+              img: ({ src, alt }) => {
+                const { alt: text, width } = splitAlt(alt ?? "");
+                if (typeof src !== "string") return null;
+                // Remote and inline sources need no vault round-trip.
+                return /^(https?:|data:|blob:)/i.test(src) ? (
+                  <img src={src} alt={text} style={width ? { maxWidth: width } : undefined} />
+                ) : (
+                  <VaultImage rel={joinRel(open, decodeURIComponent(src))} alt={text} width={width} />
+                );
+              },
               input: ({ type, checked }) =>
                 type === "checkbox" ? (
                   (() => {
@@ -1146,6 +1316,8 @@ type StrKey =
   | "tasks_file"
   | "task_glob"
   | "note_language"
+  | "attachments_dir"
+  | "image_width"
   | "transcripts_dir";
 
 function Settings({
@@ -1247,6 +1419,8 @@ function Settings({
           {field("tasks_file", "Tasks file")}
           {field("task_glob", "Tasks glob")}
           {field("transcripts_dir", "Transcripts dir")}
+          {field("attachments_dir", "Attachments dir (per note)")}
+          {field("image_width", "Image width")}
           <label className="set-row">
             <span>Keep done tasks (days)</span>
             <input

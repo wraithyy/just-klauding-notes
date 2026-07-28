@@ -23,7 +23,9 @@ brew install --cask wraithyy/tap/just-klauding-notes
 
 ## Features
 
-- **Notes** — folder tree, rendered markdown with inline **clickable task checkboxes**, a raw-markdown editor, frontmatter shown as a clean meta card, clickable relative links.
+- **Notes** — folder tree, rendered markdown with inline **clickable task checkboxes**, a raw-markdown editor, frontmatter shown as a clean meta card, clickable relative links, and **images from the vault** rendered inline.
+- **Drag & drop** — drop any file on a note: it is copied into the note's `assets/` folder and linked at the caret — images inline, other files as a `📄 name.ext` link. Remove the link and the file goes with it.
+- **Links that leave the app** — `https://` opens in your browser, a linked `.docx`/`.pdf`/`.xlsx` opens in whatever app owns the type, `.md` opens in the app.
 - **Chat** — multi-turn conversation with your vault (context kept via `claude --continue`), with buttons for your skills.
 - **Triage** — file inbox notes into projects: pick a note, fuzzy-filter the target folder or let Claude **Suggest** one.
 - **Tasks** — every `- [ ]` across your projects in one checklist, grouped by project; tick to write back. Ticking stamps the line with `✅ 2026-07-28`, and finished tasks drop into a collapsed **Done** section that only keeps the last few days (configurable).
@@ -103,6 +105,8 @@ default; override to match your own vault layout:
 | `tasks_file` | Per-project task file name (detected) |
 | `task_glob` | ripgrep glob deciding which files the Tasks view scans. Default `{projects_dir}/**/{tasks_file}`; a flat vault can use `**/*.md`, several names `**/{tasks,todo}.md`. `hidden_folders` are always excluded. |
 | `transcripts_dir` | Extra folder granted to skills like `/meeting` |
+| `attachments_dir` | Folder dropped files are copied into, relative to the note (default `assets`) |
+| `image_width` | Default max width for images in the preview (default `50%`; any CSS length) |
 | `model` | Claude model for ask / file / skills |
 | `note_language` | Language Claude writes note content in (e.g. `Czech`). Empty = mirrors the language you asked in. |
 | `archive_days` | How long a done task stays in the **Done** list (default `7`) |
@@ -116,6 +120,32 @@ partial config works fine.
 Nothing is ever deleted from your files: `archive_days` only controls what the
 Tasks view renders. Old `- [x] … ✅ <date>` lines stay in your task files — grep or
 Claude can still read them.
+
+## Images & attachments
+
+Vault-relative and absolute-from-root paths both work: `![shot](assets/a.png)`,
+`![shot](/inbox/a.png)`. Remote `https://` and inline `data:` sources render as-is.
+
+Width defaults to `image_width` (50% of the reading column) and can be overridden
+per image with an Obsidian-style hint in the alt text — `![diagram|300](a.png)`
+for pixels, `![shot|80%](a.png)` for a percentage.
+
+Images are read through the backend and inlined as data URIs, so nothing outside
+the vault is reachable from the preview. Files over 20 MB are not inlined.
+
+**Dropping files.** Drag any file onto an open note. It is copied to
+`<note-folder>/<attachments_dir>/` (default `assets/`) with an ascii-slugged name
+— an existing name is never overwritten, it gets `-1`, `-2`, … — and a link is
+inserted at the caret (at the end of the note when you're in preview mode).
+Images get `![name](assets/name.png)`, everything else `[name.ext](assets/name.ext)`.
+
+**Deleting.** Remove an attachment's link from the note and the file is deleted
+on the next autosave — but only if it sits in that note's attachments folder and
+**no other note in the vault mentions it**, so shared images stay. Recoverable
+from git if the file was committed; a file dropped and never committed is not.
+
+**Opening.** Clicking a linked file opens it in its default app; a `https://`
+link opens the browser. Paths are confined to the vault.
 
 ## Keyboard
 

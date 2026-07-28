@@ -227,6 +227,35 @@ input, textarea { accent-color: var(--accent); }
 .markdown ul:has(> li.task-list-item) { list-style: none; padding-left: 0; }
 .markdown li.task-list-item { list-style: none; }
 .markdown input[type="checkbox"] { accent-color: var(--accent); margin-right: 9px; cursor: pointer; }
+.markdown img {
+  /* --img-w comes from the image_width setting; per-image `|300` wins via style. */
+  max-width: min(100%, var(--img-w, 50%));
+  height: auto;
+  border-radius: var(--r);
+  background: var(--surface);
+  display: block;
+  margin: 1em 0;
+}
+/* A broken/missing image would otherwise collapse to an invisible sliver. */
+.markdown img:not([src]), .markdown img[src=""] { display: none; }
+.img-missing {
+  display: inline-block;
+  padding: 3px 9px;
+  border: 1px dashed var(--line);
+  border-radius: var(--r);
+  color: var(--muted);
+  font: 12px var(--mono);
+}
+/* Reserve a line while the data URI loads, so text doesn't jump. */
+.img-loading { display: block; height: 1.2em; }
+
+/* Any link that isn't a note or a URL is a file attachment: one generic glyph,
+   the link text carries name.ext. */
+.markdown a.ext:not([href^="http"])::before { content: "📄 "; }
+.markdown a.ext { text-decoration-color: var(--accent-line); }
+
+/* Drop target feedback while dragging files over the window. */
+.editor.dropping { outline: 2px dashed var(--accent); outline-offset: -6px; }
 .markdown table { border-collapse: collapse; margin: 1em 0; }
 .markdown th, .markdown td { border: 1px solid var(--line); padding: 5px 10px; text-align: left; }
 .markdown th { background: var(--surface); }

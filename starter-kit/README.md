@@ -106,6 +106,8 @@ overwrites an existing config, and you can hand-edit it or re-run the scan with
 - **model** — Claude model for ask / ai / skills (`sonnet`, `haiku`, …).
 - **note_language** — language Claude writes note content in (e.g. `Czech`). Empty = it mirrors whatever language you asked in. The vault's `CLAUDE.md` wins if it says something different.
 - **archive_days** — how long a done task stays in the Tasks view's **Done** list.
+- **attachments_dir** — where dropped files land, relative to the note (default `assets`).
+- **image_width** — default max width for images in the preview (default `50%`; per-image override with `![alt|300](x.png)`).
 - **skills** — buttons in the sidebar, Chat bar, and native **Skills** menu. `arg: true` prefills the input instead of running immediately. Add your own vault skills here.
 
 Using `vault-template-cs`? The detected config comes out like this instead —
@@ -157,7 +159,8 @@ echo 'source /path/to/note-commands.zsh' >> ~/.zshrc
 
 ## Using it
 
-- **Notes** tab — browse the tree, read/edit, tick task checkboxes inline.
+- **Notes** tab — browse the tree, read/edit, tick task checkboxes inline, see vault images rendered.
+- **Drag & drop** a file onto a note — copied into `assets/` next to the note and linked at the caret. Delete the link and the file is removed (unless another note references it). Clicking a linked file opens it in its default app; URLs open in the browser.
 - **Triage** — file inbox notes into a project (type to filter, or **Suggest**).
 - **Chat** — talk to your vault; `--continue` keeps context. Skill buttons +
   the native **Skills** menu run workflows.

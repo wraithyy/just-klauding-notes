@@ -29,6 +29,7 @@ skills read the paths below, so keep this table in sync if you rename.
 - Meeting notes: `projects/<slug>/meetings/YYYY-MM-DD-title.md` (ascii slug filename). Frontmatter: `date`, `type: meeting`, `company`, `summary`, `project`, `participants`.
 - Meetings for project X = list `projects/<slug>/meetings/`. Non-project meetings live in `notes/`.
 - Standard markdown links (relative, URL-encoded). No wikilinks, no dataview, no Templater.
+- Images and attached files live in an `assets/` folder next to the note that links them; link them relatively (`![shot](assets/shot.png)`). The app puts dropped files there.
 - Folder/file names for new project content: lowercase ascii slugs.
 - New project = copy the `templates/project/` scaffold (use /new-project).
 - Ticking a task stamps it `- [x] … ✅ YYYY-MM-DD`; keep that format when ticking by hand.
