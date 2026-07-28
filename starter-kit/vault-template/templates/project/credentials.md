@@ -1,8 +1,8 @@
 ---
 project: {{project}}
 ---
-# {{project}} — Přístupy
+# {{project}} — Credentials
 
-| Prostředí | Username | Password | Role |
-| --------- | -------- | -------- | ---- |
-|           |          |          |      |
+| Environment | Username | Password | Role |
+| ----------- | -------- | -------- | ---- |
+|             |          |          |      |

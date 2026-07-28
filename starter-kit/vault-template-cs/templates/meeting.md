@@ -1,21 +1,21 @@
 ---
 date: {{date}}
 type: meeting
-company:
+firma:
 summary:
 project: {{project}}
 participants:
 ---
 # {{title}}
 
-**Participants:**
+**Účastníci:**
 -
 
 ## Agenda
 -
 
-## Notes
+## Poznámky
 -
 
-## My action items
+## Úkoly na mě
 - [ ]

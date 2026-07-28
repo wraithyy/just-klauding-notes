@@ -1,16 +1,16 @@
 ---
 project: {{project}}
 ---
-# {{project}} — Odkazy
+# {{project}} — Links
 
-| Popis | URL |
-| ----- | --- |
-|       |     |
+| Description | URL |
+| ----------- | --- |
+|             |     |
 
-## Prostředí
+## Environments
 
-| Prostředí | Odkaz |
-| --------- | ----- |
-| DEV       |       |
-| TEST      |       |
-| PROD      |       |
+| Environment | URL |
+| ----------- | --- |
+| DEV         |     |
+| TEST        |     |
+| PROD        |     |

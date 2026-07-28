@@ -1,9 +1,9 @@
 ---
-firma:
+company:
 email:
-pozice:
+role:
 ---
-# {{jmeno}}
+# {{name}}
 
-## Poznámky
+## Notes
 -

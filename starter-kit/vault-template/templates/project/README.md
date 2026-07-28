@@ -4,14 +4,14 @@ customer: {{customer}}
 ---
 # {{project}}
 
-- [Odkazy](odkazy.md) · [Přístupy](pristupy.md) · [Úkoly](ukoly.md) · [Schůzky](schuzky/)
+- [Links](links.md) · [Credentials](credentials.md) · [Tasks](tasks.md) · [Meetings](meetings/)
 
-## Obecné poznámky
+## General notes
 
-## Seznam lidí
-| Jméno | Role |
-| ----- | ---- |
+## People
+| Name | Role |
+| ---- | ---- |
 | | |
 
-## Seznam schůzek
-Viz složka [schuzky/](schuzky/).
+## Meetings
+See the [meetings/](meetings/) folder.

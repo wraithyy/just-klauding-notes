@@ -25,20 +25,32 @@ brew install ripgrep git
 
 ## 2. Create your vault
 
-Copy the template to `~/Development/Notes` (the default location):
+Two starters ship here — pick one:
+
+| Template | For |
+| --- | --- |
+| [`vault-template/`](vault-template) | **Neutral, English.** English folder names (`projects/ people/ notes/ inbox/`), English skills, note language set in `CLAUDE.md`. Start here if you're not sure. |
+| [`vault-template-cs/`](vault-template-cs) | **Opinionated, Czech.** The author's own layout: `projekty/ lidi/ poznamky/ inbox/`, `ukoly.md`, `schuzky/`, person frontmatter `firma`/`pozice`/`email`, Czech note content, `/meeting` wired to MacWhisper exports. |
+
+Copy one anywhere; `~/Notes` is found automatically:
 
 ```sh
-cp -R "vault-template" ~/Development/Notes
-cd ~/Development/Notes
+cp -R "vault-template" ~/Notes      # or vault-template-cs
+cd ~/Notes
 git init && git add -A && git commit -m "init vault"
 # optional: git remote add origin <your-repo> && git push -u origin main
 ```
 
-Prefer a different location? Put it anywhere and tell the app via an env var
-(see step 4).
+Any other location works too — pick it in the app (Getting Started → **Change…**)
+or set `NOTES_VAULT` (see step 4).
 
-Edit `~/Development/Notes/CLAUDE.md` to add your project-name aliases (how you
-*say* a project vs its folder slug) — it makes `ask` and triage much smarter.
+Either way the app detects the layout on first launch, so you can also rename
+anything afterwards — just keep `CLAUDE.md`'s structure table in sync, since the
+skills read it.
+
+Edit `~/Notes/CLAUDE.md` to set the note language and add your project-name
+aliases (how you *say* a project vs its folder slug) — it makes `ask` and triage
+much smarter.
 
 ## 3. Install the app
 
@@ -57,21 +69,26 @@ vault (with a folder picker), folder names, task file, Claude model, hidden
 folders, and the skills list. First-run also offers a vault **Change…** picker
 in Getting Started.
 
-Settings are saved to `~/.config/just-klauding-notes/config.json`, which you can
-also hand-edit — the app writes every field with its current value so you can
-adapt it to your own vault layout:
+On first launch the app **detects your vault's layout** (which folder is
+projects, people, notes, inbox, and what the per-project task file is called) and
+writes the result to `~/.config/just-klauding-notes/config.json`. It never
+overwrites an existing config, and you can hand-edit it or re-run the scan with
+**Settings → Re-detect layout**:
 
 ```json
 {
-  "vault": "~/Development/Notes",
-  "hidden_folders": ["archiv", "peceni"],
-  "projects_dir": "projekty",
-  "people_dir": "lidi",
-  "notes_dir": "poznamky",
+  "vault": "~/Notes",
+  "hidden_folders": ["archive", "templates"],
+  "projects_dir": "projects",
+  "people_dir": "people",
+  "notes_dir": "notes",
   "inbox_dir": "inbox",
-  "tasks_file": "ukoly.md",
+  "tasks_file": "tasks.md",
+  "task_glob": "projects/**/tasks.md",
   "transcripts_dir": "~/Documents/transcripts",
   "model": "sonnet",
+  "note_language": "",
+  "archive_days": 7,
   "skills": [
     { "label": "Meeting summary", "cmd": "/meeting", "arg": false },
     { "label": "Weekly digest", "cmd": "/weekly", "arg": false },
@@ -83,12 +100,35 @@ adapt it to your own vault layout:
 
 - **hidden_folders** — folders kept out of the sidebar tree.
 - **projects_dir / people_dir / notes_dir / inbox_dir** — your structure; drive the Triage targets, capture location, and new-note default.
-- **tasks_file** — the file scanned for `- [ ]` in each project (Tasks tab).
+- **tasks_file** — the per-project task file name (detected).
+- **task_glob** — ripgrep glob deciding which files the Tasks tab scans. A flat vault can use `**/*.md`, several names `**/{tasks,todo}.md`; `hidden_folders` are always excluded.
 - **transcripts_dir** — extra folder granted to skills like `/meeting`.
 - **model** — Claude model for ask / ai / skills (`sonnet`, `haiku`, …).
+- **note_language** — language Claude writes note content in (e.g. `Czech`). Empty = it mirrors whatever language you asked in. The vault's `CLAUDE.md` wins if it says something different.
+- **archive_days** — how long a done task stays in the Tasks view's **Done** list.
 - **skills** — buttons in the sidebar, Chat bar, and native **Skills** menu. `arg: true` prefills the input instead of running immediately. Add your own vault skills here.
 
-(A `NOTES_VAULT` env var still works as a fallback for the vault path.)
+Using `vault-template-cs`? The detected config comes out like this instead —
+`note_language` is the only field worth setting by hand:
+
+```json
+{
+  "hidden_folders": ["templates"],
+  "projects_dir": "projekty",
+  "people_dir": "lidi",
+  "notes_dir": "poznamky",
+  "tasks_file": "ukoly.md",
+  "task_glob": "projekty/**/ukoly.md",
+  "note_language": "Czech"
+}
+```
+
+The app also passes the resolved layout and `note_language` to Claude as a system
+prompt on every call, so skills work against your folder names without being
+edited.
+
+(A `NOTES_VAULT` env var still works as a fallback for the vault path, as do
+`~/Development/Notes`, `~/Notes`, `~/Documents/Notes` and `~/vault` if they exist.)
 
 ## 5. `note` shell commands (optional)
 
@@ -106,11 +146,14 @@ echo 'source /path/to/note-commands.zsh' >> ~/.zshrc
 
 ## What's in the vault
 
+(Paths below are the English template's; `vault-template-cs` uses
+`projekty/ lidi/ poznamky/` and `ukoly.md`.)
+
 - `.claude/skills/` — `note`, `inbox-triage`, `meeting`, `weekly`, `new-project`.
   These are what the app's **Skills** menu and the Chat `/commands` run.
 - `CLAUDE.md` — vault conventions + Q&A rules the assistant reads on every call.
 - `templates/` — scaffolds for meetings, projects, people.
-- `inbox/ projekty/ lidi/ poznamky/` — your content.
+- `inbox/ projects/ people/ notes/` — your content. Rename them freely; the app detects the layout and `CLAUDE.md` tells the skills where things live.
 
 ## Using it
 
@@ -123,6 +166,7 @@ echo 'source /path/to/note-commands.zsh' >> ~/.zshrc
 
 ## Notes on `/meeting`
 
-`/meeting` with no args processes the newest transcript in
-`~/Documents/transcripts/` (a MacWhisper export folder). The app grants access
+`/meeting` with no args processes every unprocessed transcript in
+`~/Documents/transcripts/` (a MacWhisper export folder), oldest first, tracking
+what it has done in `.processed-transcripts` at the vault root. The app grants access
 to that folder automatically. Or run `/meeting <path-to-transcript>`.

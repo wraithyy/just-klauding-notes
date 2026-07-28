@@ -5,11 +5,10 @@ description: Cross-project weekly digest printed to terminal. Use for "/weekly" 
 
 # /weekly
 
-Read-only — writes nothing, commits nothing. Folder names below are the defaults
-from `CLAUDE.md`; follow that file if this vault renamed them.
+Read-only — writes nothing, commits nothing.
 
 1. `git log --since='1 week ago' --name-only --pretty=format:'%ad %s' --date=short` — group changes by top folder/project. Ignore `autosync` commit messages themselves; use their file lists.
-2. Open tasks: grep `- [ ]` in `projects/*/tasks.md`.
-3. New meetings this week: files added under `projects/*/meetings/`.
+2. Open tasks: grep `- [ ]` in `projekty/*/ukoly.md`.
+3. New meetings this week: files added under `projekty/*/schuzky/`.
 4. Inbox state: count of unsorted files in `inbox/`.
-5. Print the digest in the vault's language (see `CLAUDE.md`): per-project bullet summary, then open-tasks table, then inbox note.
+5. Print a Czech digest: per-project bullet summary, then open-tasks table, then inbox note.

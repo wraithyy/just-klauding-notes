@@ -1,6 +1,6 @@
 ---
 project: {{project}}
 ---
-# {{project}} — Tasks
+# {{project}} — Úkoly
 
 - [ ]

@@ -40,8 +40,10 @@ The app drives Claude Code against your vault — you install and log in yoursel
 - [Claude Code](https://claude.com/claude-code) (`claude`), logged in
 - `ripgrep` (search + tasks) and `git` (sync) — `brew install ripgrep git`; the
   cask installs `ripgrep` for you, `git` ships with the Xcode CLI tools
-- A markdown vault — bring your own, or start from
-  [`starter-kit/vault-template`](starter-kit/vault-template)
+- A markdown vault — bring your own, or start from a template:
+  [`vault-template`](starter-kit/vault-template) (neutral, English) or
+  [`vault-template-cs`](starter-kit/vault-template-cs) (opinionated Czech: `projekty/`,
+  `lidi/`, `ukoly.md`, Czech note content)
 
 ## Install
 
@@ -75,6 +77,18 @@ A **Getting Started** dialog checks `claude`, `ripgrep`, `git` and your vault,
 and lets you pick the vault folder. The installed version is shown next to the
 title in **⚙ Settings**.
 
+The app then **detects your vault's layout** instead of assuming one: it looks
+for the folder that plays each role — projects (`projects`, `projekty`,
+`clients`, `work`, …), people (`people`, `contacts`, …), notes (`notes`,
+`zettel`, …), inbox (`inbox`, `00-inbox`, …) — and the per-project task file
+(`tasks.md`, `todo.md`, `ukoly.md`). Whatever it finds is written to
+`~/.config/just-klauding-notes/config.json`, which you can then edit freely;
+the app never overwrites an existing config. Nothing recognised → neutral
+defaults (`projects`, `people`, `notes`, `inbox`, `tasks.md`).
+
+Renamed or reorganised your vault later? **⚙ Settings → Re-detect layout**
+re-runs the scan and fills the form; it only takes effect when you hit Save.
+
 ## Configuration
 
 Set via **⚙ Settings** in the app (or edit
@@ -86,16 +100,21 @@ default; override to match your own vault layout:
 | `vault` | Vault location (folder picker in Settings) |
 | `hidden_folders` | Folders kept out of the tree |
 | `projects_dir` / `people_dir` / `notes_dir` / `inbox_dir` | Your structure |
-| `tasks_file` | File scanned for `- [ ]` per project |
+| `tasks_file` | Per-project task file name (detected) |
+| `task_glob` | ripgrep glob deciding which files the Tasks view scans. Default `{projects_dir}/**/{tasks_file}`; a flat vault can use `**/*.md`, several names `**/{tasks,todo}.md`. `hidden_folders` are always excluded. |
 | `transcripts_dir` | Extra folder granted to skills like `/meeting` |
 | `model` | Claude model for ask / file / skills |
+| `note_language` | Language Claude writes note content in (e.g. `Czech`). Empty = mirrors the language you asked in. |
 | `archive_days` | How long a done task stays in the **Done** list (default `7`) |
 | `skills` | Buttons + native menu (`{ label, cmd, arg }`) |
 
-Resolution order: config file → `NOTES_VAULT` env → default (`~/Development/Notes`).
+Vault resolution order: config file → `NOTES_VAULT` env → the first of
+`~/Development/Notes`, `~/Notes`, `~/Documents/Notes`, `~/vault` that exists.
+Every other field: config file → detected from the vault → neutral default, so a
+partial config works fine.
 
 Nothing is ever deleted from your files: `archive_days` only controls what the
-Tasks view renders. Old `- [x] … ✅ <date>` lines stay in `ukoly.md` — grep or
+Tasks view renders. Old `- [x] … ✅ <date>` lines stay in your task files — grep or
 Claude can still read them.
 
 ## Keyboard
@@ -144,8 +163,13 @@ The "AI" lives in your **vault**, not the app: `.claude/skills/` and `CLAUDE.md`
 are read by Claude Code on each call (the app runs `claude -p … --setting-sources project`
 with the vault as the working directory).
 
-[`starter-kit/`](starter-kit) has a shareable skeleton vault, optional `note`
-shell commands, and a full setup guide.
+The app adds one thing the vault can't know: your resolved layout and
+`note_language`, passed as `--append-system-prompt`. That way the shipped skills
+work against your folder names, in your language, without being edited. Your
+`CLAUDE.md` still wins where the two disagree.
+
+[`starter-kit/`](starter-kit) has two skeleton vaults (English and opinionated
+Czech), optional `note` shell commands, and a full setup guide.
 
 ## Tech
 
