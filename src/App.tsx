@@ -19,6 +19,7 @@ import {
   setVault,
   getConfig,
   saveConfig,
+  detectConfig,
   readNote,
   writeNote,
   moveNote,
@@ -36,26 +37,6 @@ import logo from "./assets/logo.svg";
 import "./App.css";
 
 type Msg = { role: "user" | "claude"; text: string };
-
-// Fallback until get_config() resolves (mirrors the Rust defaults).
-const DEFAULT_CONFIG: Config = {
-  vault: "",
-  hidden_folders: ["archiv", "peceni"],
-  projects_dir: "projekty",
-  people_dir: "lidi",
-  notes_dir: "poznamky",
-  inbox_dir: "inbox",
-  tasks_file: "ukoly.md",
-  transcripts_dir: "~/Documents/transcripts",
-  model: "sonnet",
-  archive_days: 7,
-  skills: [
-    { label: "Meeting summary", cmd: "/meeting", arg: false },
-    { label: "Weekly digest", cmd: "/weekly", arg: false },
-    { label: "Triage inbox", cmd: "/inbox-triage", arg: false },
-    { label: "New project", cmd: "/new-project", arg: true },
-  ],
-};
 
 // Resolve a relative md link against the note it lives in. Returns null for
 // external/non-note links (left to default handling).
@@ -101,7 +82,9 @@ export default function App() {
   const [newNote, setNewNote] = useState(false);
   const [gettingStarted, setGettingStarted] = useState(false);
   const [settings, setSettings] = useState(false);
-  const [cfg, setCfg] = useState<Config>(DEFAULT_CONFIG);
+  // Config comes from the backend (which detects the vault layout); the app
+  // waits for it rather than guessing defaults that could contradict Rust.
+  const [cfg, setCfg] = useState<Config | null>(null);
   const cfgRef = useRef(cfg);
   cfgRef.current = cfg;
 
@@ -212,7 +195,7 @@ export default function App() {
   // Native macOS "Skills" menu → run the skill in Chat.
   useEffect(() => {
     const un = listen<string>("run-skill", (e) => {
-      const s = cfgRef.current.skills.find((x) => x.cmd === e.payload);
+      const s = cfgRef.current?.skills.find((x) => x.cmd === e.payload);
       setView("chat");
       setChatCmd({ cmd: e.payload, run: s ? !s.arg : true });
     });
@@ -233,6 +216,8 @@ export default function App() {
   async function runTriage() {
     return runNote("skill", "/inbox-triage");
   }
+
+  if (!cfg) return <div className="empty">Loading…</div>;
 
   return (
     <div className="app">
@@ -739,13 +724,18 @@ function Triage({
   const [suggesting, setSuggesting] = useState(false);
 
   const inbox = entries.filter((e) => !e.is_dir && e.path.startsWith(cfg.inbox_dir + "/"));
+  // Every folder under the configured roots, at any depth — projects nested two
+  // levels deep are as valid a target as top-level ones.
   const targets = useMemo(() => {
-    const projRe = new RegExp(`^${cfg.projects_dir}/[^/]+$`);
+    const under = (dir: string) =>
+      entries.filter((e) => e.is_dir && e.path.startsWith(dir + "/")).map((e) => e.path);
     return [
-      ...entries.filter((e) => e.is_dir && projRe.test(e.path)).map((e) => e.path),
+      ...under(cfg.projects_dir),
       cfg.people_dir,
+      ...under(cfg.people_dir),
       cfg.notes_dir,
-    ];
+      ...under(cfg.notes_dir),
+    ].sort();
   }, [entries, cfg]);
   const matches = targets.filter((t) => t.toLowerCase().includes(q.toLowerCase()));
 
@@ -988,7 +978,7 @@ function slugify(s: string): string {
   );
 }
 
-// Global task list: every `- [ ]` across projekty/*/ukoly.md, grouped by
+// Global task list: every `- [ ]` matching the configured task glob, grouped by
 // project. Ticking writes the flip back to the file.
 const taskKey = (t: Task) => `${t.file}:${t.line}`;
 
@@ -1030,9 +1020,8 @@ function Tasks({
         else done.push(t);
         continue;
       }
-      const proj = t.file.split("/")[1] ?? t.file;
-      if (!m.has(proj)) m.set(proj, []);
-      m.get(proj)!.push(t);
+      if (!m.has(t.group)) m.set(t.group, []);
+      m.get(t.group)!.push(t);
     }
     return { groups: [...m.entries()], done, hidden };
   }, [tasks, sticky, archiveDays]);
@@ -1155,6 +1144,8 @@ type StrKey =
   | "notes_dir"
   | "inbox_dir"
   | "tasks_file"
+  | "task_glob"
+  | "note_language"
   | "transcripts_dir";
 
 function Settings({
@@ -1176,6 +1167,26 @@ function Settings({
   const chooseVault = async () => {
     const picked = await openDialog({ directory: true, title: "Choose your notes vault" });
     if (typeof picked === "string") up({ vault: picked });
+  };
+
+  // Fill the form from what the vault actually contains; the user still has to
+  // hit Save, so nothing is written behind their back.
+  const redetect = async () => {
+    try {
+      const det = await detectConfig();
+      up({
+        projects_dir: det.projects_dir,
+        people_dir: det.people_dir,
+        notes_dir: det.notes_dir,
+        inbox_dir: det.inbox_dir,
+        tasks_file: det.tasks_file,
+        task_glob: det.task_glob,
+        hidden_folders: det.hidden_folders,
+      });
+      setHiddenText(det.hidden_folders.join(", "));
+    } catch (e) {
+      console.error("detect_config failed:", e);
+    }
   };
 
   const field = (key: StrKey, label: string) => (
@@ -1228,11 +1239,13 @@ function Settings({
             </div>
           </label>
           {field("model", "Claude model")}
+          {field("note_language", "Note language")}
           {field("projects_dir", "Projects dir")}
           {field("people_dir", "People dir")}
           {field("notes_dir", "Notes dir")}
           {field("inbox_dir", "Inbox dir")}
           {field("tasks_file", "Tasks file")}
+          {field("task_glob", "Tasks glob")}
           {field("transcripts_dir", "Transcripts dir")}
           <label className="set-row">
             <span>Keep done tasks (days)</span>
@@ -1294,6 +1307,9 @@ function Settings({
 
         <div className="cmdk-foot">
           <span className="gs-status">Applies on save; the native Skills menu updates after restart.</span>
+          <button className="ghost" onClick={redetect}>
+            Re-detect layout
+          </button>
           <button className="ghost" onClick={onClose}>
             Cancel
           </button>

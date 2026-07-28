@@ -38,8 +38,10 @@ struct Config {
     notes_dir: Option<String>,
     inbox_dir: Option<String>,
     tasks_file: Option<String>,
+    task_glob: Option<String>,
     transcripts_dir: Option<String>,
     model: Option<String>,
+    note_language: Option<String>,
     archive_days: Option<u32>,
     skills: Option<Vec<Skill>>,
 }
@@ -54,8 +56,10 @@ struct ResolvedConfig {
     notes_dir: String,
     inbox_dir: String,
     tasks_file: String,
+    task_glob: String,
     transcripts_dir: String,
     model: String,
+    note_language: String,
     archive_days: u32,
     skills: Vec<Skill>,
 }
@@ -81,25 +85,99 @@ fn read_config() -> Config {
         .unwrap_or_default()
 }
 
+// Layout detection: vaults are organised (and named) differently per person, so
+// every folder role has a list of aliases. First one that actually exists in the
+// vault wins; if none do, a neutral English name is used.
+const PROJECTS_DIRS: &[&str] = &["projekty", "projects", "clients", "klienti", "work", "1-projects"];
+const PEOPLE_DIRS: &[&str] = &["lidi", "people", "contacts", "kontakty"];
+const NOTES_DIRS: &[&str] = &["poznamky", "notes", "zapisky", "zettel"];
+const INBOX_DIRS: &[&str] = &["inbox", "00-inbox", "0-inbox", "_inbox"];
+// ponytail: "peceni" and "tables" are the author's own folders, kept so his
+// first launch is byte-identical; drop them once his config.json exists.
+const HIDDEN_DIRS: &[&str] =
+    &["archiv", "archive", "peceni", "tables", "templates", "attachments", "assets"];
+const TASK_FILES: &[&str] = &["ukoly.md", "tasks.md", "todo.md", "TODO.md"];
+
+// Sorted names of the directories directly inside `p`.
+fn dir_names(p: &Path) -> Vec<String> {
+    let mut v: Vec<String> = std::fs::read_dir(p)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|e| e.path().is_dir())
+        .map(|e| e.file_name().to_string_lossy().to_string())
+        .collect();
+    v.sort();
+    v
+}
+
+// First candidate that exists in `present`, matched case-insensitively but
+// returned with the vault's own spelling.
+fn pick(cands: &[&str], present: &[String]) -> Option<String> {
+    cands.iter().find_map(|c| {
+        present
+            .iter()
+            .find(|p| p.eq_ignore_ascii_case(c))
+            .cloned()
+    })
+}
+
+// The task file name used inside the projects folder, e.g. `ukoly.md`. Looks one
+// level down, since that is where per-project files live — and falls back to the
+// project scaffold, so a fresh vault with no projects yet still detects the name
+// its own template would create.
+fn pick_task_file(vault: &Path, projects_dir: &str) -> Option<String> {
+    let projects = vault.join(projects_dir);
+    let subdirs = dir_names(&projects);
+    let scaffold = vault.join("templates/project");
+    TASK_FILES.iter().find_map(|f| {
+        let in_project = subdirs.iter().any(|d| projects.join(d).join(f).is_file());
+        (in_project || scaffold.join(f).is_file()).then(|| (*f).to_string())
+    })
+}
+
 fn resolved() -> ResolvedConfig {
-    let c = read_config();
+    resolved_from(read_config(), &vault())
+}
+
+// Config with defaults filled in. Anything the config file leaves out is
+// detected from `v`'s actual contents, so a partial config still works.
+fn resolved_from(c: Config, v: &Path) -> ResolvedConfig {
     let s = |o: Option<String>, d: &str| o.filter(|v| !v.trim().is_empty()).unwrap_or_else(|| d.into());
+    let present = dir_names(v);
+    let detect = |cands: &[&str], fallback: &str| {
+        pick(cands, &present).unwrap_or_else(|| fallback.into())
+    };
+    let projects_dir = s(c.projects_dir, &detect(PROJECTS_DIRS, "projects"));
+    let tasks_file = s(
+        c.tasks_file,
+        &pick_task_file(v, &projects_dir).unwrap_or_else(|| "tasks.md".into()),
+    );
     ResolvedConfig {
-        vault: s(c.vault, "~/Development/Notes"),
-        hidden_folders: c.hidden_folders.unwrap_or_else(|| vec!["archiv".into(), "peceni".into()]),
-        projects_dir: s(c.projects_dir, "projekty"),
-        people_dir: s(c.people_dir, "lidi"),
-        notes_dir: s(c.notes_dir, "poznamky"),
-        inbox_dir: s(c.inbox_dir, "inbox"),
-        tasks_file: s(c.tasks_file, "ukoly.md"),
+        vault: v.to_string_lossy().to_string(),
+        hidden_folders: c.hidden_folders.unwrap_or_else(|| {
+            HIDDEN_DIRS
+                .iter()
+                .filter_map(|d| pick(&[d], &present))
+                .collect()
+        }),
+        task_glob: s(c.task_glob, &format!("{projects_dir}/**/{tasks_file}")),
+        projects_dir,
+        people_dir: s(c.people_dir, &detect(PEOPLE_DIRS, "people")),
+        notes_dir: s(c.notes_dir, &detect(NOTES_DIRS, "notes")),
+        inbox_dir: s(c.inbox_dir, &detect(INBOX_DIRS, "inbox")),
+        tasks_file,
         transcripts_dir: s(c.transcripts_dir, "~/Documents/transcripts"),
         model: s(c.model, "sonnet"),
+        // Empty = say nothing and let Claude mirror the input language.
+        note_language: c.note_language.unwrap_or_default(),
         archive_days: c.archive_days.unwrap_or(7),
         skills: c.skills.unwrap_or_else(default_skills),
     }
 }
 
-// Vault root, resolved: config file → NOTES_VAULT env → default.
+// Vault root — the only place the path is resolved: config file → NOTES_VAULT
+// env → the first candidate that exists on disk → neutral default.
 fn vault() -> PathBuf {
     if let Some(v) = read_config().vault {
         if !v.trim().is_empty() {
@@ -111,39 +189,71 @@ fn vault() -> PathBuf {
             return expand(v.trim());
         }
     }
-    Path::new(&home()).join("Development/Notes")
+    ["~/Development/Notes", "~/Notes", "~/Documents/Notes", "~/vault"]
+        .iter()
+        .map(|c| expand(c))
+        .find(|p| p.is_dir())
+        .unwrap_or_else(|| expand("~/Notes"))
 }
 
 #[tauri::command]
 fn get_config() -> ResolvedConfig {
-    resolved()
+    let r = resolved();
+    // First launch: freeze the detected layout into a file the user can edit.
+    // Never touches an existing config, even a partial one.
+    if !config_path().exists() {
+        if let Err(e) = write_resolved(&r) {
+            eprintln!("could not write initial config: {e}");
+        }
+    }
+    r
+}
+
+// Detected layout for the current vault, ignoring whatever layout the config
+// file holds. Returns it for the Settings form; writes nothing.
+#[tauri::command]
+fn detect_config() -> ResolvedConfig {
+    let mut c = read_config();
+    c.projects_dir = None;
+    c.people_dir = None;
+    c.notes_dir = None;
+    c.inbox_dir = None;
+    c.tasks_file = None;
+    c.task_glob = None;
+    c.hidden_folders = None;
+    resolved_from(c, &vault())
+}
+
+fn write_resolved(r: &ResolvedConfig) -> Result<(), String> {
+    let p = config_path();
+    if let Some(dir) = p.parent() {
+        std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    }
+    std::fs::write(p, serde_json::to_string_pretty(r).map_err(|e| e.to_string())?)
+        .map_err(|e| e.to_string())
 }
 
 // Persist a full config from the Settings panel.
 #[tauri::command]
 fn save_config(config: ResolvedConfig) -> Result<(), String> {
-    let p = config_path();
-    if let Some(dir) = p.parent() {
-        std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
-    }
-    std::fs::write(
-        p,
-        serde_json::to_string_pretty(&config).map_err(|e| e.to_string())?,
-    )
-    .map_err(|e| e.to_string())
+    write_resolved(&config)
 }
 
 // Persist the full resolved config (self-documenting) with a new vault path.
+// The layout is re-detected against the new vault — keeping the old vault's
+// folder names would leave the app pointing at directories that don't exist.
 #[tauri::command]
 fn set_vault(path: String) -> Result<(), String> {
-    let mut r = resolved();
-    r.vault = path;
-    let p = config_path();
-    if let Some(dir) = p.parent() {
-        std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
-    }
-    std::fs::write(p, serde_json::to_string_pretty(&r).map_err(|e| e.to_string())?)
-        .map_err(|e| e.to_string())
+    let mut c = read_config();
+    c.vault = Some(path.clone());
+    c.projects_dir = None;
+    c.people_dir = None;
+    c.notes_dir = None;
+    c.inbox_dir = None;
+    c.tasks_file = None;
+    c.task_glob = None;
+    c.hidden_folders = None;
+    write_resolved(&resolved_from(c, &expand(path.trim())))
 }
 
 // A GUI app launched from Finder inherits a minimal PATH (no Homebrew/npm), so
@@ -201,8 +311,7 @@ struct Entry {
 #[tauri::command]
 fn read_tree() -> Result<Vec<Entry>, String> {
     let root = vault();
-    let mut hidden = resolved().hidden_folders;
-    hidden.push("templates".into());
+    let hidden = resolved().hidden_folders;
     let mut out = Vec::new();
     walk(&root, &root, &hidden, &mut out)?;
     out.sort_by(|a, b| a.path.cmp(&b.path));
@@ -355,6 +464,23 @@ struct Task {
     text: String,
     done: bool,
     done_at: Option<String>,
+    // Heading the task is listed under: the project it belongs to, at whatever
+    // depth it sits, or its parent folder when it lives outside projects_dir.
+    group: String,
+}
+
+fn task_group(file: &str, projects_dir: &str) -> String {
+    let rel = file
+        .strip_prefix(projects_dir)
+        .map(|r| r.trim_start_matches('/'))
+        .unwrap_or(file);
+    let mut segs: Vec<&str> = rel.split('/').collect();
+    segs.pop();
+    if segs.is_empty() {
+        rel.to_string()
+    } else {
+        segs.join("/")
+    }
 }
 
 // Completion stamp appended to a ticked line: `- [x] foo ✅ 2026-07-27`.
@@ -375,7 +501,10 @@ fn split_stamp(body: &str) -> (String, Option<String>) {
 
 #[cfg(test)]
 mod tests {
-    use super::split_stamp;
+    use super::{
+        pick, split_stamp, task_group, HIDDEN_DIRS, INBOX_DIRS, NOTES_DIRS, PEOPLE_DIRS,
+        PROJECTS_DIRS,
+    };
 
     #[test]
     fn stamp_parsing() {
@@ -388,19 +517,100 @@ mod tests {
         assert_eq!(split_stamp("hotovo ✅"), ("hotovo ✅".into(), None));
         assert_eq!(split_stamp("✅ zítra"), ("✅ zítra".into(), None));
     }
+
+    fn names(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn pick_aliases() {
+        // The author's vault must keep resolving to exactly today's layout.
+        let mine = names(&[
+            "archiv", "inbox", "lidi", "peceni", "poznamky", "projekty", "tables", "templates",
+        ]);
+        assert_eq!(pick(PROJECTS_DIRS, &mine).as_deref(), Some("projekty"));
+        assert_eq!(pick(PEOPLE_DIRS, &mine).as_deref(), Some("lidi"));
+        assert_eq!(pick(NOTES_DIRS, &mine).as_deref(), Some("poznamky"));
+        assert_eq!(pick(INBOX_DIRS, &mine).as_deref(), Some("inbox"));
+        let hidden: Vec<String> = HIDDEN_DIRS.iter().filter_map(|d| pick(&[d], &mine)).collect();
+        assert_eq!(hidden, names(&["archiv", "peceni", "tables", "templates"]));
+
+        // An English vault detects its own names, whatever the case.
+        let theirs = names(&["Inbox", "Notes", "People", "Projects", "archive"]);
+        assert_eq!(pick(PROJECTS_DIRS, &theirs).as_deref(), Some("Projects"));
+        assert_eq!(pick(INBOX_DIRS, &theirs).as_deref(), Some("Inbox"));
+
+        // Nothing recognised → callers fall back to the neutral names.
+        assert_eq!(pick(PROJECTS_DIRS, &names(&["stuff"])), None);
+    }
+
+    // Detection against a real (temporary) English-named vault: nothing but the
+    // directory contents decides the layout.
+    #[test]
+    fn detect_foreign_layout() {
+        let root = std::env::temp_dir().join(format!("jkn-test-{}", std::process::id()));
+        for d in ["projects/acme", "people", "notes", "inbox", "archive"] {
+            std::fs::create_dir_all(root.join(d)).unwrap();
+        }
+        std::fs::write(root.join("projects/acme/tasks.md"), "- [ ] foo\n").unwrap();
+
+        let r = super::resolved_from(super::Config::default(), &root);
+        assert_eq!(r.projects_dir, "projects");
+        assert_eq!(r.people_dir, "people");
+        assert_eq!(r.notes_dir, "notes");
+        assert_eq!(r.inbox_dir, "inbox");
+        assert_eq!(r.tasks_file, "tasks.md");
+        assert_eq!(r.task_glob, "projects/**/tasks.md");
+        assert_eq!(r.hidden_folders, names(&["archive"]));
+
+        // An explicit config field always wins over detection.
+        let c = super::Config { task_glob: Some("**/*.md".into()), ..Default::default() };
+        assert_eq!(super::resolved_from(c, &root).task_glob, "**/*.md");
+
+        // A fresh vault with no projects yet: the scaffold names the task file.
+        // (This is what copying either starter template gives you.)
+        std::fs::remove_dir_all(root.join("projects/acme")).unwrap();
+        std::fs::create_dir_all(root.join("templates/project")).unwrap();
+        std::fs::write(root.join("templates/project/ukoly.md"), "- [ ]\n").unwrap();
+        let r = super::resolved_from(super::Config::default(), &root);
+        assert_eq!(r.tasks_file, "ukoly.md");
+        assert_eq!(r.task_glob, "projects/**/ukoly.md");
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn grouping() {
+        assert_eq!(task_group("projekty/acme/ukoly.md", "projekty"), "acme");
+        assert_eq!(task_group("projekty/a/b/ukoly.md", "projekty"), "a/b");
+        // Outside projects_dir: grouped by the folder it sits in.
+        assert_eq!(task_group("poznamky/tasks.md", "projekty"), "poznamky");
+        // Vault root: nothing to group by, so the file names itself.
+        assert_eq!(task_group("tasks.md", "projekty"), "tasks.md");
+        // A task file directly in projects_dir, not in a project folder.
+        assert_eq!(task_group("projekty/ukoly.md", "projekty"), "ukoly.md");
+    }
 }
 
-// Every checkbox task across projekty/*/ukoly.md.
+// Every checkbox task matching the configured task glob.
 #[tauri::command]
 async fn list_tasks() -> Result<Vec<Task>, String> {
     let r = resolved();
-    let glob = format!("{}/**/{}", r.projects_dir, r.tasks_file);
+    let mut args: Vec<String> = ["--line-number", "--no-heading", "--color", "never"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    args.push("-g".into());
+    args.push(r.task_glob.clone());
+    // Archived/hidden folders stay out of the list even if the glob is wide.
+    for h in &r.hidden_folders {
+        args.push("-g".into());
+        args.push(format!("!{h}/**"));
+    }
+    args.push(r"^\s*- \[[ xX]\]".into());
     let out = proc("rg")
         .current_dir(vault())
-        .args([
-            "--line-number", "--no-heading", "--color", "never",
-            "-g", &glob, r"^\s*- \[[ xX]\]",
-        ])
+        .args(&args)
         .output()
         .map_err(|e| format!("rg failed: {e}"))?;
     let text = String::from_utf8_lossy(&out.stdout);
@@ -418,7 +628,8 @@ async fn list_tasks() -> Result<Vec<Task>, String> {
                 .trim_start_matches("- [X]")
                 .trim();
             let (text, done_at) = split_stamp(body);
-            Some(Task { file, line, text, done, done_at })
+            let group = task_group(&file, &r.projects_dir);
+            Some(Task { file, line, text, done, done_at, group })
         })
         .collect())
 }
@@ -454,6 +665,26 @@ fn toggle_task(file: String, line: u32, today: String) -> Result<bool, String> {
     Ok(done)
 }
 
+// Which folder plays which role in THIS vault, plus the language notes should be
+// written in. Passed as a system prompt (not glued onto the prompt text) so it
+// reaches slash-command skills too, without being mistaken for their arguments.
+// The vault's own CLAUDE.md still wins where the two disagree.
+fn vault_context(cfg: &ResolvedConfig) -> String {
+    let mut s = format!(
+        "This vault's layout, relative to its root: projects in `{}/`, people in `{}/`, \
+         notes in `{}/`, inbox in `{}/`, per-project task file `{}`. \
+         Use these paths rather than assuming any other folder names.",
+        cfg.projects_dir, cfg.people_dir, cfg.notes_dir, cfg.inbox_dir, cfg.tasks_file
+    );
+    let lang = cfg.note_language.trim();
+    if !lang.is_empty() {
+        s.push_str(&format!(
+            " Write note content in {lang}, regardless of the language of the request."
+        ));
+    }
+    s
+}
+
 // Bridge to the `note` claude commands. Flags mirror dot_zshrc.tmpl exactly.
 // kind: "ask" | "ai" | "capture" | "triage".
 // async so the long claude call runs off the main thread (a sync command would
@@ -465,10 +696,13 @@ async fn run_note(kind: String, text: String, cont: bool) -> Result<String, Stri
     let base: Vec<String> = ["-p", "--model", cfg.model.as_str(), "--strict-mcp-config",
                 "--disable-slash-commands", "--setting-sources", "project"]
         .iter().map(|s| s.to_string()).collect();
+    let ctx = vault_context(&cfg);
     let mut args: Vec<String> = Vec::new();
     match kind.as_str() {
         "ask" => {
             args.extend(base);
+            args.push("--append-system-prompt".into());
+            args.push(ctx);
             if cont {
                 args.push("--continue".into());
             }
@@ -477,6 +711,8 @@ async fn run_note(kind: String, text: String, cont: bool) -> Result<String, Stri
         "ai" => {
             args.extend(base);
             args.extend(["--permission-mode", "acceptEdits"].iter().map(|s| s.to_string()));
+            args.push("--append-system-prompt".into());
+            args.push(ctx);
             // =form: --allowedTools is variadic and would consume the prompt.
             args.push("--allowedTools=Bash(git:*),Bash(date:*)".into());
             args.push(text);
@@ -490,6 +726,8 @@ async fn run_note(kind: String, text: String, cont: bool) -> Result<String, Stri
                          "--permission-mode", "acceptEdits"].iter().map(|s| s.to_string()));
             // =form: --allowedTools is variadic and would consume the prompt.
             args.push("--allowedTools=Read,Edit,Write,Glob,Grep,Bash".into());
+            args.push("--append-system-prompt".into());
+            args.push(ctx);
             // Some skills (e.g. /meeting) read transcripts outside the vault —
             // grant that dir if it exists.
             // --add-dir is variadic — as a separate token it swallows the
@@ -576,7 +814,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             read_tree, grep, read_note, write_note, move_note, run_note,
-            delete_note, git_status, git_sync, list_tasks, toggle_task, check_env,
+            delete_note, git_status, git_sync, list_tasks, toggle_task, check_env, detect_config,
             set_vault, get_config, save_config
         ])
         .run(tauri::generate_context!())

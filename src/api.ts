@@ -8,6 +8,8 @@ export type Task = {
   text: string;
   done: boolean;
   done_at: string | null;
+  // Heading the task is listed under, computed by the backend from the path.
+  group: string;
 };
 
 // Local calendar date, ISO. Dates live in the vault as `✅ YYYY-MM-DD`, so they
@@ -52,12 +54,17 @@ export type Config = {
   notes_dir: string;
   inbox_dir: string;
   tasks_file: string;
+  task_glob: string;
   transcripts_dir: string;
   model: string;
+  // Language Claude writes note content in; empty = mirror the request.
+  note_language: string;
   archive_days: number;
   skills: Skill[];
 };
 export const getConfig = () => invoke<Config>("get_config");
+// Layout detected from the vault's actual contents; writes nothing.
+export const detectConfig = () => invoke<Config>("detect_config");
 export const saveConfig = (config: Config) => invoke<void>("save_config", { config });
 
 // Czech-friendly inbox slug (strip diacritics, keep ascii words).
