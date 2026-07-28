@@ -6,7 +6,9 @@ import remarkGfm from "remark-gfm";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { getVersion } from "@tauri-apps/api/app";
 import { listen } from "@tauri-apps/api/event";
-import { open as openDialog } from "@tauri-apps/plugin-dialog";
+// The webview's window.confirm/alert are async in Tauri (they return promises),
+// so use the dialog plugin explicitly — a forgotten await silently answers yes.
+import { open as openDialog, confirm as askConfirm, message } from "@tauri-apps/plugin-dialog";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import {
   type Entry,
@@ -234,7 +236,9 @@ export default function App() {
   };
 
   const onDelete = async () => {
-    if (!open || !cfg || !confirm(`Delete ${open}?`)) return;
+    if (!open || !cfg) return;
+    if (!(await askConfirm(`Delete ${open}?`, { title: "Delete note", kind: "warning" })))
+      return;
     // The backend reads the note off disk and lists only what it would actually
     // remove (skipping files other notes still reference).
     let assets: string[] = [];
@@ -245,19 +249,26 @@ export default function App() {
     }
     const withAssets =
       assets.length > 0 &&
-      confirm(
+      (await askConfirm(
         `Delete the ${assets.length} file(s) this note links to as well?\n\n` +
           assets.join("\n"),
-      );
+        { title: "Delete attachments", kind: "warning" },
+      ));
     try {
       const res = await deleteNote(open, withAssets);
       // Every folder the delete emptied gets its own question.
       for (const dir of res.empty_dirs) {
-        if (confirm(`${dir} is empty now. Delete the folder too?`)) await deleteDir(dir);
+        if (
+          await askConfirm(`${dir} is empty now. Delete the folder too?`, {
+            title: "Empty folder",
+          })
+        ) {
+          await deleteDir(dir);
+        }
       }
     } catch (e) {
       console.error("delete failed:", e);
-      alert(`Delete failed: ${e}`);
+      await message(`Delete failed: ${e}`, { title: "Delete", kind: "error" });
       return;
     }
     setOpen(null);
