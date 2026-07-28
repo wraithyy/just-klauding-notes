@@ -1,7 +1,7 @@
 {
   "name": "just-klauding-notes",
   "private": true,
-  "version": "0.4.0",
+  "version": "0.5.0",
   "description": "Native macOS app for a plain-markdown notes vault, powered by Claude Code.",
   "license": "MIT",
   "author": "Josef Kvapil",

@@ -98,6 +98,7 @@ button { font: inherit; color: inherit; }
 }
 .tree-dir:hover { color: var(--text); }
 .tree-dir .chev { display: inline-block; width: 11px; color: var(--accent); }
+.has-assets { margin-left: 5px; font-size: 10px; opacity: 0.7; cursor: help; }
 .tree-file {
   padding: 4px 8px;
   margin: 0 6px;

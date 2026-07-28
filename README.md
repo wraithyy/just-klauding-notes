@@ -24,7 +24,7 @@ brew install --cask wraithyy/tap/just-klauding-notes
 ## Features
 
 - **Notes** — folder tree, rendered markdown with inline **clickable task checkboxes**, a raw-markdown editor, frontmatter shown as a clean meta card, clickable relative links, and **images from the vault** rendered inline.
-- **Drag & drop** — drop any file on a note: it is copied into the note's `assets/` folder and linked at the caret — images inline, other files as a `📄 name.ext` link. Remove the link and the file goes with it.
+- **Drag & drop** — drop any file on a note: it is copied into the note's `assets/` folder and linked at the caret — images inline, other files as a `📄 name.ext` link. Remove the link and the file goes with it; the folders stay out of the tree (📎 marker instead).
 - **Links that leave the app** — `https://` opens in your browser, a linked `.docx`/`.pdf`/`.xlsx` opens in whatever app owns the type, `.md` opens in the app.
 - **Chat** — multi-turn conversation with your vault (context kept via `claude --continue`), with buttons for your skills.
 - **Triage** — file inbox notes into projects: pick a note, fuzzy-filter the target folder or let Claude **Suggest** one.
@@ -143,6 +143,14 @@ Images get `![name](assets/name.png)`, everything else `[name.ext](assets/name.e
 on the next autosave — but only if it sits in that note's attachments folder and
 **no other note in the vault mentions it**, so shared images stay. Recoverable
 from git if the file was committed; a file dropped and never committed is not.
+
+Deleting a note asks twice more, so nothing goes silently: whether to delete the
+attachments it links to, and — if that leaves the note's folder empty — whether
+to remove the folder as well. An emptied attachments folder is removed without
+asking, since the app is the only thing that puts files there.
+
+**Out of the way.** Attachments folders are not shown in the sidebar tree; a
+folder that has one is marked with a 📎 instead (hover for the tooltip).
 
 **Opening.** Clicking a linked file opens it in its default app; a `https://`
 link opens the browser. Paths are confined to the vault.

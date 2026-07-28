@@ -25,6 +25,7 @@ import {
   writeNote,
   moveNote,
   deleteNote,
+  deleteDir,
   runNote,
   attachFile,
   readAsset,
@@ -232,8 +233,28 @@ export default function App() {
   };
 
   const onDelete = async () => {
-    if (!open) return;
-    await deleteNote(open);
+    if (!open || !cfg || !confirm(`Delete ${open}?`)) return;
+    // The note's own attachments are offered separately — they may be worth
+    // keeping, and anything referenced by another note is kept regardless.
+    const assets = linkTargets(body).filter((t) =>
+      t.startsWith(cfg.attachments_dir + "/"),
+    );
+    const withAssets =
+      assets.length > 0 &&
+      confirm(
+        `Delete the ${assets.length} attachment(s) this note links to as well?\n\n` +
+          assets.join("\n"),
+      );
+    try {
+      const res = await deleteNote(open, withAssets);
+      if (res.folder && confirm(`${res.folder} is empty now. Delete the folder too?`)) {
+        await deleteDir(res.folder);
+      }
+    } catch (e) {
+      console.error("delete failed:", e);
+      alert(`Delete failed: ${e}`);
+      return;
+    }
     setOpen(null);
     setBody("");
     localStorage.removeItem("open");
@@ -579,6 +600,11 @@ function Tree({
               onClick={() => toggle(e.path)}
             >
               <span className="chev">{collapsed.has(e.path) ? "▸" : "▾"}</span> {e.name}
+              {e.has_assets && (
+                <span className="has-assets" title="Contains an assets folder">
+                  📎
+                </span>
+              )}
             </div>
           ) : (
             <div
@@ -711,9 +737,7 @@ function Editor({
           <button onClick={() => setEditing((v) => !v)}>{editing ? "View" : "Edit"}</button>
           <button
             className="danger"
-            onClick={() => {
-              if (confirm(`Delete ${open}?`)) onDelete();
-            }}
+            onClick={onDelete}
           >
             Delete
           </button>

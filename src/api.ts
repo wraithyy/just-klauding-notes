@@ -1,6 +1,12 @@
 import { invoke } from "@tauri-apps/api/core";
 
-export type Entry = { path: string; name: string; is_dir: boolean };
+export type Entry = {
+  path: string;
+  name: string;
+  is_dir: boolean;
+  // Dirs only: an attachments folder lives inside (the tree hides those).
+  has_assets: boolean;
+};
 export type Hit = { path: string; line: number; text: string };
 export type Task = {
   file: string;
@@ -26,7 +32,11 @@ export const writeNote = (rel: string, body: string) =>
   invoke<void>("write_note", { rel, body });
 export const moveNote = (from: string, to: string) =>
   invoke<void>("move_note", { from, to });
-export const deleteNote = (rel: string) => invoke<void>("delete_note", { rel });
+export type DeleteResult = { deleted_assets: string[]; folder: string | null };
+export const deleteNote = (rel: string, withAssets: boolean) =>
+  invoke<DeleteResult>("delete_note", { rel, withAssets });
+// Removes a folder only if it is empty.
+export const deleteDir = (rel: string) => invoke<boolean>("delete_dir", { rel });
 export const runNote = (kind: string, text: string, cont = false) =>
   invoke<string>("run_note", { kind, text, cont });
 // Copies `src` next to `note` and returns the path to put in the markdown link.

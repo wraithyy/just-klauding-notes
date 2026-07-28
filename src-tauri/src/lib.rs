@@ -312,6 +312,9 @@ struct Entry {
     path: String, // vault-relative
     name: String,
     is_dir: bool,
+    // Dirs only: an attachments folder sits inside. The tree hides those folders
+    // and shows a marker on the parent instead.
+    has_assets: bool,
 }
 
 // Flat list of every note + folder, vault-relative. Frontend builds the tree.
@@ -319,18 +322,27 @@ struct Entry {
 #[tauri::command]
 fn read_tree() -> Result<Vec<Entry>, String> {
     let root = vault();
-    let hidden = resolved().hidden_folders;
+    let r = resolved();
     let mut out = Vec::new();
-    walk(&root, &root, &hidden, &mut out)?;
+    walk(&root, &root, &r.hidden_folders, &r.attachments_dir, &mut out)?;
     out.sort_by(|a, b| a.path.cmp(&b.path));
+    for e in out.iter_mut().filter(|e| e.is_dir) {
+        e.has_assets = root.join(&e.path).join(&r.attachments_dir).is_dir();
+    }
     Ok(out)
 }
 
-fn walk(root: &Path, dir: &Path, hidden: &[String], out: &mut Vec<Entry>) -> Result<(), String> {
+fn walk(
+    root: &Path,
+    dir: &Path,
+    hidden: &[String],
+    attachments: &str,
+    out: &mut Vec<Entry>,
+) -> Result<(), String> {
     for e in std::fs::read_dir(dir).map_err(|e| e.to_string())? {
         let e = e.map_err(|e| e.to_string())?;
         let name = e.file_name().to_string_lossy().to_string();
-        if name.starts_with('.') || hidden.iter().any(|h| h == &name) {
+        if name.starts_with('.') || name == attachments || hidden.iter().any(|h| h == &name) {
             continue;
         }
         let p = e.path();
@@ -343,9 +355,10 @@ fn walk(root: &Path, dir: &Path, hidden: &[String], out: &mut Vec<Entry>) -> Res
             path: rel.to_string_lossy().to_string(),
             name,
             is_dir,
+            has_assets: false,
         });
         if is_dir {
-            walk(root, &p, hidden, out)?;
+            walk(root, &p, hidden, attachments, out)?;
         }
     }
     Ok(())
@@ -428,8 +441,81 @@ fn git(args: &[&str]) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn delete_note(rel: String) -> Result<(), String> {
-    std::fs::remove_file(resolve(&rel)?).map_err(|e| e.to_string())
+fn delete_note(rel: String, with_assets: bool) -> Result<DeleteResult, String> {
+    let r = resolved();
+    let note_dir = Path::new(&rel)
+        .parent()
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_default();
+    // Read the links before the file goes, so the attachments can be found.
+    let links = if with_assets {
+        note_links(&resolve(&rel)?)
+    } else {
+        Vec::new()
+    };
+    std::fs::remove_file(resolve(&rel)?).map_err(|e| e.to_string())?;
+
+    let mut deleted_assets = Vec::new();
+    if with_assets {
+        deleted_assets = prune_attachments(rel.clone(), links)?;
+    }
+    // An emptied attachments folder always goes without asking — it is app
+    // bookkeeping, not something the user put there.
+    let dir_abs = if note_dir.is_empty() { vault() } else { resolve(&note_dir)? };
+    remove_if_empty(&dir_abs.join(&r.attachments_dir));
+
+    Ok(DeleteResult {
+        deleted_assets,
+        // The note's own folder is the user's, so only offer it.
+        folder: (!note_dir.is_empty() && dir_is_empty(&dir_abs)).then_some(note_dir),
+    })
+}
+
+#[derive(Serialize)]
+struct DeleteResult {
+    deleted_assets: Vec<String>,
+    // Set when the note's folder is now empty and could be removed too.
+    folder: Option<String>,
+}
+
+// Every link/image target in a markdown file.
+fn note_links(p: &Path) -> Vec<String> {
+    let text = std::fs::read_to_string(p).unwrap_or_default();
+    let mut out = Vec::new();
+    // `](target)` — enough for the links this app writes; no markdown parser.
+    for part in text.split("](").skip(1) {
+        if let Some(end) = part.find(')') {
+            let t = part[..end].trim();
+            if !t.is_empty() {
+                out.push(t.to_string());
+            }
+        }
+    }
+    out
+}
+
+// Directories holding nothing but macOS cruft count as empty.
+fn dir_is_empty(p: &Path) -> bool {
+    std::fs::read_dir(p)
+        .map(|it| it.flatten().all(|e| e.file_name() == ".DS_Store"))
+        .unwrap_or(false)
+}
+
+// Delete a directory that is (effectively) empty. No-op otherwise.
+fn remove_if_empty(p: &Path) -> bool {
+    if !p.is_dir() || !dir_is_empty(p) {
+        return false;
+    }
+    for e in std::fs::read_dir(p).into_iter().flatten().flatten() {
+        let _ = std::fs::remove_file(e.path());
+    }
+    std::fs::remove_dir(p).is_ok()
+}
+
+// Remove a folder the user was asked about. Refuses anything not empty.
+#[tauri::command]
+fn delete_dir(rel: String) -> Result<bool, String> {
+    Ok(remove_if_empty(&resolve(&rel)?))
 }
 
 // Count of uncommitted changes.
@@ -583,6 +669,33 @@ mod tests {
         let r = super::resolved_from(super::Config::default(), &root);
         assert_eq!(r.tasks_file, "ukoly.md");
         assert_eq!(r.task_glob, "projects/**/ukoly.md");
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn links_and_empty_dirs() {
+        let root = std::env::temp_dir().join(format!("jkn-del-{}", std::process::id()));
+        std::fs::create_dir_all(root.join("assets")).unwrap();
+        let note = root.join("note.md");
+        std::fs::write(
+            &note,
+            "# T\n\n![a](assets/a.png)\n\n[doc](assets/b.docx) and [ext](https://x.dev)\n",
+        )
+        .unwrap();
+        assert_eq!(
+            super::note_links(&note),
+            vec!["assets/a.png", "assets/b.docx", "https://x.dev"],
+        );
+
+        // A folder with only .DS_Store counts as empty and gets removed.
+        let dir = root.join("assets");
+        std::fs::write(dir.join(".DS_Store"), "junk").unwrap();
+        assert!(super::dir_is_empty(&dir));
+        assert!(super::remove_if_empty(&dir));
+        assert!(!dir.exists());
+        // A folder with real content is left alone.
+        assert!(!super::remove_if_empty(&root));
 
         std::fs::remove_dir_all(&root).ok();
     }
@@ -762,7 +875,7 @@ fn prune_attachments(note: String, removed: Vec<String>) -> Result<Vec<String>, 
         deleted.push(vault_rel);
         // Tidy up the folder once its last attachment is gone.
         if let Some(dir) = abs.parent() {
-            let _ = std::fs::remove_dir(dir);
+            remove_if_empty(dir);
         }
     }
     Ok(deleted)
@@ -1019,7 +1132,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             read_tree, grep, read_note, write_note, move_note, run_note,
-            delete_note, git_status, git_sync, list_tasks, toggle_task, check_env, detect_config, attach_file, read_asset, open_external, prune_attachments,
+            delete_note, git_status, git_sync, list_tasks, toggle_task, check_env, detect_config, attach_file, read_asset, open_external, prune_attachments, delete_dir,
             set_vault, get_config, save_config
         ])
         .run(tauri::generate_context!())
