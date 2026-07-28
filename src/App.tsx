@@ -234,21 +234,23 @@ export default function App() {
 
   const onDelete = async () => {
     if (!open || !cfg || !confirm(`Delete ${open}?`)) return;
-    // The note's own attachments are offered separately — they may be worth
-    // keeping, and anything referenced by another note is kept regardless.
-    const assets = linkTargets(body).filter((t) =>
-      t.startsWith(cfg.attachments_dir + "/"),
+    // Linked local files are offered separately — they may be worth keeping, and
+    // anything another note references is kept regardless. Notes are never
+    // collateral, only attachments.
+    const assets = linkTargets(body).filter(
+      (t) => !/^[a-z][a-z0-9+-]*:/i.test(t) && !t.endsWith(".md"),
     );
     const withAssets =
       assets.length > 0 &&
       confirm(
-        `Delete the ${assets.length} attachment(s) this note links to as well?\n\n` +
+        `Delete the ${assets.length} file(s) this note links to as well?\n\n` +
           assets.join("\n"),
       );
     try {
       const res = await deleteNote(open, withAssets);
-      if (res.folder && confirm(`${res.folder} is empty now. Delete the folder too?`)) {
-        await deleteDir(res.folder);
+      // Every folder the delete emptied gets its own question.
+      for (const dir of res.empty_dirs) {
+        if (confirm(`${dir} is empty now. Delete the folder too?`)) await deleteDir(dir);
       }
     } catch (e) {
       console.error("delete failed:", e);

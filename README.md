@@ -144,10 +144,12 @@ on the next autosave — but only if it sits in that note's attachments folder a
 **no other note in the vault mentions it**, so shared images stay. Recoverable
 from git if the file was committed; a file dropped and never committed is not.
 
-Deleting a note asks twice more, so nothing goes silently: whether to delete the
-attachments it links to, and — if that leaves the note's folder empty — whether
-to remove the folder as well. An emptied attachments folder is removed without
-asking, since the app is the only thing that puts files there.
+Deleting a note asks, so nothing goes silently: first whether to delete the local
+files it links to — **any** linked file, not just the ones in `attachments_dir`,
+and never other notes — then, for every folder the delete left empty, whether to
+remove that folder too. Files another note still references are kept either way.
+An emptied attachments folder is removed without asking, since the app is the
+only thing that puts files there.
 
 **Out of the way.** Attachments folders are not shown in the sidebar tree; a
 folder that has one is marked with a 📎 instead (hover for the tooltip).

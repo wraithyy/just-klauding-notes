@@ -32,7 +32,7 @@ export const writeNote = (rel: string, body: string) =>
   invoke<void>("write_note", { rel, body });
 export const moveNote = (from: string, to: string) =>
   invoke<void>("move_note", { from, to });
-export type DeleteResult = { deleted_assets: string[]; folder: string | null };
+export type DeleteResult = { deleted_assets: string[]; empty_dirs: string[] };
 export const deleteNote = (rel: string, withAssets: boolean) =>
   invoke<DeleteResult>("delete_note", { rel, withAssets });
 // Removes a folder only if it is empty.

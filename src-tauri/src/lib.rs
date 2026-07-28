@@ -443,39 +443,39 @@ fn git(args: &[&str]) -> Result<(), String> {
 #[tauri::command]
 fn delete_note(rel: String, with_assets: bool) -> Result<DeleteResult, String> {
     let r = resolved();
-    let note_dir = Path::new(&rel)
-        .parent()
-        .map(|p| p.to_string_lossy().to_string())
-        .unwrap_or_default();
+    let note_dir = note_dir_of(&rel);
     // Read the links before the file goes, so the attachments can be found.
-    let links = if with_assets {
-        note_links(&resolve(&rel)?)
-    } else {
-        Vec::new()
-    };
+    let links = if with_assets { note_links(&resolve(&rel)?) } else { Vec::new() };
     std::fs::remove_file(resolve(&rel)?).map_err(|e| e.to_string())?;
 
-    let mut deleted_assets = Vec::new();
-    if with_assets {
-        deleted_assets = prune_attachments(rel.clone(), links)?;
-    }
-    // An emptied attachments folder always goes without asking — it is app
-    // bookkeeping, not something the user put there.
-    let dir_abs = if note_dir.is_empty() { vault() } else { resolve(&note_dir)? };
-    remove_if_empty(&dir_abs.join(&r.attachments_dir));
+    let (deleted_assets, mut dirs) = delete_orphans(&note_dir, links, None)?;
+    // The note's own folder is a candidate too.
+    dirs.push(if note_dir.is_empty() { vault() } else { resolve(&note_dir)? });
 
-    Ok(DeleteResult {
-        deleted_assets,
-        // The note's own folder is the user's, so only offer it.
-        folder: (!note_dir.is_empty() && dir_is_empty(&dir_abs)).then_some(note_dir),
-    })
+    let root = vault();
+    let mut empty_dirs = Vec::new();
+    for d in dirs {
+        if d == root || !dir_is_empty(&d) {
+            continue;
+        }
+        // An emptied attachments folder is app bookkeeping — just remove it.
+        if d.file_name().map(|n| n == r.attachments_dir.as_str()).unwrap_or(false) {
+            remove_if_empty(&d);
+            continue;
+        }
+        if let Ok(rel_dir) = d.strip_prefix(&root) {
+            empty_dirs.push(rel_dir.to_string_lossy().to_string());
+        }
+    }
+    empty_dirs.sort();
+    Ok(DeleteResult { deleted_assets, empty_dirs })
 }
 
 #[derive(Serialize)]
 struct DeleteResult {
     deleted_assets: Vec<String>,
-    // Set when the note's folder is now empty and could be removed too.
-    folder: Option<String>,
+    // Folders left empty by the delete, for the UI to offer removing.
+    empty_dirs: Vec<String>,
 }
 
 // Every link/image target in a markdown file.
@@ -837,28 +837,40 @@ fn has_scheme(s: &str) -> bool {
     }
 }
 
-// Delete attachments a note no longer links to. Only touches files inside that
-// note's attachments folder, and only when nothing else in the vault mentions
-// the filename — a shared image stays put. Returns what was deleted.
-#[tauri::command]
-fn prune_attachments(note: String, removed: Vec<String>) -> Result<Vec<String>, String> {
-    let r = resolved();
-    let note_dir = Path::new(&note)
-        .parent()
-        .map(|p| p.to_string_lossy().to_string())
-        .unwrap_or_default();
-    let prefix = format!("{}/", r.attachments_dir);
+// Delete files a note linked to, skipping anything another note still mentions.
+// `restrict_to` limits it to one folder (the attachments dir) for the on-save
+// cleanup; deleting a whole note passes None and covers every linked file.
+// Returns the deleted vault-relative paths and the folders they came out of.
+fn delete_orphans(
+    note_dir: &str,
+    rels: Vec<String>,
+    restrict_to: Option<&str>,
+) -> Result<(Vec<String>, Vec<PathBuf>), String> {
     let mut deleted = Vec::new();
-    for rel in removed {
-        if !rel.starts_with(&prefix) || rel.contains("..") {
+    let mut dirs: Vec<PathBuf> = Vec::new();
+    for rel in rels {
+        // Notes are never collateral, and neither is anything with a scheme.
+        if rel.contains("..") || has_scheme(&rel) || rel.ends_with(".md") {
             continue;
+        }
+        if let Some(dir) = restrict_to {
+            if !rel.starts_with(&format!("{dir}/")) {
+                continue;
+            }
         }
         let name = match Path::new(&rel).file_name() {
             Some(n) => n.to_string_lossy().to_string(),
             None => continue,
         };
-        let vault_rel = if note_dir.is_empty() { rel.clone() } else { format!("{note_dir}/{rel}") };
-        let abs = resolve(&vault_rel)?;
+        let vault_rel = match (note_dir.is_empty(), rel.starts_with('/')) {
+            (_, true) => rel.trim_start_matches('/').to_string(),
+            (true, false) => rel.clone(),
+            (false, false) => format!("{note_dir}/{rel}"),
+        };
+        let abs = match resolve(&vault_rel) {
+            Ok(p) => p,
+            Err(_) => continue,
+        };
         if !abs.is_file() {
             continue;
         }
@@ -873,12 +885,33 @@ fn prune_attachments(note: String, removed: Vec<String>) -> Result<Vec<String>, 
         }
         std::fs::remove_file(&abs).map_err(|e| e.to_string())?;
         deleted.push(vault_rel);
-        // Tidy up the folder once its last attachment is gone.
-        if let Some(dir) = abs.parent() {
-            remove_if_empty(dir);
+        if let Some(d) = abs.parent() {
+            if !dirs.contains(&d.to_path_buf()) {
+                dirs.push(d.to_path_buf());
+            }
         }
     }
+    Ok((deleted, dirs))
+}
+
+// On-save cleanup: an attachment whose link the user removed. Confined to the
+// note's attachments folder — auto-deleting arbitrary linked files on every
+// keystroke-triggered save would be far too eager.
+#[tauri::command]
+fn prune_attachments(note: String, removed: Vec<String>) -> Result<Vec<String>, String> {
+    let r = resolved();
+    let (deleted, dirs) = delete_orphans(&note_dir_of(&note), removed, Some(&r.attachments_dir))?;
+    for d in dirs {
+        remove_if_empty(&d);
+    }
     Ok(deleted)
+}
+
+fn note_dir_of(note: &str) -> String {
+    Path::new(note)
+        .parent()
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_default()
 }
 
 // Copy a dropped file into the vault next to the note that received it, under
