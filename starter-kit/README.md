@@ -160,7 +160,7 @@ echo 'source /path/to/note-commands.zsh' >> ~/.zshrc
 ## Using it
 
 - **Notes** tab — browse the tree, read/edit, tick task checkboxes inline, see vault images rendered.
-- **Drag & drop** a file onto a note — copied into `assets/` next to the note and linked at the caret. Delete the link and the file is removed (unless another note references it). Deleting a note asks whether to take its attachments and its emptied folder with it. Attachments folders are hidden from the tree; their parent gets a 📎 marker. Clicking a linked file opens it in its default app; URLs open in the browser.
+- **Drag & drop** a file onto a note — copied into `assets/` next to the note and linked at the caret. Delete the link and the file is removed (unless another note references it). Deleting a note asks whether to take its attachments and its emptied folder with it. Folders holding only attachments are hidden from the tree; the nearest folder that is shown gets a paperclip marker. Clicking a linked file opens it in its default app; URLs open in the browser.
 - **Triage** — file inbox notes into a project (type to filter, or **Suggest**).
 - **Chat** — talk to your vault; `--continue` keeps context. Skill buttons +
   the native **Skills** menu run workflows.

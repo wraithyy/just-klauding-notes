@@ -295,7 +295,10 @@ fn proc(bin: &str) -> Command {
 
 // Resolve a vault-relative path, refusing anything that escapes the root.
 fn resolve(rel: &str) -> Result<PathBuf, String> {
-    let root = vault();
+    resolve_in(&vault(), rel)
+}
+
+fn resolve_in(root: &Path, rel: &str) -> Result<PathBuf, String> {
     let p = root.join(rel);
     let canon_root = root.canonicalize().map_err(|e| e.to_string())?;
     // Canonicalize the parent (file may not exist yet on write).
@@ -326,8 +329,38 @@ fn read_tree() -> Result<Vec<Entry>, String> {
     let mut out = Vec::new();
     walk(&root, &root, &r.hidden_folders, &r.attachments_dir, &mut out)?;
     out.sort_by(|a, b| a.path.cmp(&b.path));
+    // Folders holding no notes anywhere below them are attachment folders as far
+    // as the tree is concerned: drop them, and mark the nearest folder that does
+    // show up, so the marker sits next to where the files are used.
+    let has_notes = |dir: &str| {
+        out.iter()
+            .any(|e| !e.is_dir && e.path.starts_with(&format!("{dir}/")))
+    };
+    let dropped: Vec<String> = out
+        .iter()
+        .filter(|e| e.is_dir && !has_notes(&e.path))
+        .map(|e| e.path.clone())
+        .collect();
+    out.retain(|e| !e.is_dir || !dropped.contains(&e.path));
+    // Each dropped folder marks its *nearest* surviving ancestor, so the marker
+    // sits as close to the files as the tree allows.
+    let mut marks: Vec<String> = Vec::new();
+    for d in dropped.iter().filter(|d| !dir_is_empty(&root.join(d))) {
+        let mut cur = Path::new(d).parent();
+        while let Some(p) = cur {
+            let ps = p.to_string_lossy().to_string();
+            if ps.is_empty() {
+                break; // vault root has no row to mark
+            }
+            if !dropped.contains(&ps) {
+                marks.push(ps);
+                break;
+            }
+            cur = p.parent();
+        }
+    }
     for e in out.iter_mut().filter(|e| e.is_dir) {
-        e.has_assets = root.join(&e.path).join(&r.attachments_dir).is_dir();
+        e.has_assets = marks.contains(&e.path) || has_loose_files(&root.join(&e.path));
     }
     Ok(out)
 }
@@ -440,31 +473,75 @@ fn git(args: &[&str]) -> Result<(), String> {
     }
 }
 
+// What deleting this note would remove besides the note: local files it links
+// to that no other note references. Read off disk, so the dialog can't be based
+// on a stale editor buffer.
+#[tauri::command]
+fn delete_plan(rel: String) -> Result<Vec<String>, String> {
+    delete_plan_in(&vault(), &rel)
+}
+
+fn delete_plan_in(root: &Path, rel: &str) -> Result<Vec<String>, String> {
+    let note_dir = note_dir_of(rel);
+    let note = resolve_in(root, rel)?;
+    let mut out = Vec::new();
+    for link in note_links(&note) {
+        let Some((vault_rel, name)) = attachment_of(&note_dir, &link) else { continue };
+        let Ok(abs) = resolve_in(root, &vault_rel) else { continue };
+        if !abs.is_file() || out.contains(&vault_rel) {
+            continue;
+        }
+        // Referenced by another note (this one still exists, so allow one hit).
+        if md_files(root)
+            .iter()
+            .filter(|p| **p != note)
+            .any(|p| std::fs::read_to_string(p).map(|t| t.contains(&name)).unwrap_or(false))
+        {
+            continue;
+        }
+        out.push(vault_rel);
+    }
+    Ok(out)
+}
+
 #[tauri::command]
 fn delete_note(rel: String, with_assets: bool) -> Result<DeleteResult, String> {
-    let r = resolved();
-    let note_dir = note_dir_of(&rel);
+    delete_note_in(&vault(), &resolved().attachments_dir, &rel, with_assets)
+}
+
+// Delete a note, optionally the local files it links to, and report the folders
+// left empty. Takes the vault root so it can be tested against a scratch dir.
+fn delete_note_in(
+    root: &Path,
+    attachments_dir: &str,
+    rel: &str,
+    with_assets: bool,
+) -> Result<DeleteResult, String> {
+    let note_dir = note_dir_of(rel);
+    let note = resolve_in(root, rel)?;
     // Read the links before the file goes, so the attachments can be found.
-    let links = if with_assets { note_links(&resolve(&rel)?) } else { Vec::new() };
-    std::fs::remove_file(resolve(&rel)?).map_err(|e| e.to_string())?;
+    let links = if with_assets { note_links(&note) } else { Vec::new() };
+    std::fs::remove_file(&note).map_err(|e| e.to_string())?;
 
-    let (deleted_assets, mut dirs) = delete_orphans(&note_dir, links, None)?;
+    let (deleted_assets, mut dirs) = delete_orphans(root, &note_dir, links, None)?;
     // The note's own folder is a candidate too.
-    dirs.push(if note_dir.is_empty() { vault() } else { resolve(&note_dir)? });
+    dirs.push(if note_dir.is_empty() { root.to_path_buf() } else { resolve_in(root, &note_dir)? });
 
-    let root = vault();
     let mut empty_dirs = Vec::new();
     for d in dirs {
         if d == root || !dir_is_empty(&d) {
             continue;
         }
         // An emptied attachments folder is app bookkeeping — just remove it.
-        if d.file_name().map(|n| n == r.attachments_dir.as_str()).unwrap_or(false) {
+        if d.file_name().map(|n| n == attachments_dir).unwrap_or(false) {
             remove_if_empty(&d);
             continue;
         }
-        if let Ok(rel_dir) = d.strip_prefix(&root) {
-            empty_dirs.push(rel_dir.to_string_lossy().to_string());
+        if let Ok(rel_dir) = d.strip_prefix(root) {
+            let rel_dir = rel_dir.to_string_lossy().to_string();
+            if !empty_dirs.contains(&rel_dir) {
+                empty_dirs.push(rel_dir);
+            }
         }
     }
     empty_dirs.sort();
@@ -492,6 +569,18 @@ fn note_links(p: &Path) -> Vec<String> {
         }
     }
     out
+}
+
+// Any non-note file sitting directly in this folder.
+fn has_loose_files(p: &Path) -> bool {
+    std::fs::read_dir(p)
+        .map(|it| {
+            it.flatten().any(|e| {
+                let n = e.file_name().to_string_lossy().to_string();
+                e.path().is_file() && !n.starts_with('.') && !n.ends_with(".md")
+            })
+        })
+        .unwrap_or(false)
 }
 
 // Directories holding nothing but macOS cruft count as empty.
@@ -673,6 +762,86 @@ mod tests {
         std::fs::remove_dir_all(&root).ok();
     }
 
+    // The exact shape that failed in the app: two notes sharing one image in a
+    // folder of their own.
+    #[test]
+    fn delete_keeps_shared_then_cleans_up() {
+        let root = std::env::temp_dir().join(format!("jkn-share-{}", std::process::id()));
+        std::fs::remove_dir_all(&root).ok();
+        let dir = root.join("shared-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("pic.png"), "png").unwrap();
+        std::fs::write(dir.join("a.md"), "![p](pic.png)\n").unwrap();
+        std::fs::write(dir.join("b.md"), "![p](pic.png)\n").unwrap();
+
+        // First note: the image is still referenced by b.md, so it stays and the
+        // folder is not empty.
+        let r = super::delete_note_in(&root, "assets", "shared-test/a.md", true).unwrap();
+        assert!(r.deleted_assets.is_empty(), "shared image must survive");
+        assert!(r.empty_dirs.is_empty());
+        assert!(dir.join("pic.png").is_file());
+
+        // Second note: last reference gone → image deleted, folder reported empty.
+        let r = super::delete_note_in(&root, "assets", "shared-test/b.md", true).unwrap();
+        assert_eq!(r.deleted_assets, vec!["shared-test/pic.png"]);
+        assert_eq!(r.empty_dirs, vec!["shared-test"]);
+        assert!(!dir.join("pic.png").exists());
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    // Files in a sibling folder, plus an attachments folder that goes silently.
+    #[test]
+    fn plan_lists_only_what_would_go() {
+        let root = std::env::temp_dir().join(format!("jkn-plan-{}", std::process::id()));
+        std::fs::remove_dir_all(&root).ok();
+        std::fs::create_dir_all(root.join("p/files")).unwrap();
+        std::fs::write(root.join("p/files/own.png"), "x").unwrap();
+        std::fs::write(root.join("p/files/shared.png"), "x").unwrap();
+        std::fs::write(root.join("p/other.md"), "![s](files/shared.png)\n").unwrap();
+        std::fs::write(
+            root.join("p/n.md"),
+            "![o](files/own.png) ![s](files/shared.png) [note](other.md) [web](https://x.dev)\n",
+        )
+        .unwrap();
+
+        // Only the file nobody else links to, and never notes or URLs.
+        assert_eq!(
+            super::delete_plan_in(&root, "p/n.md").unwrap(),
+            vec!["p/files/own.png"],
+        );
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn delete_reports_every_emptied_folder() {
+        let root = std::env::temp_dir().join(format!("jkn-empty-{}", std::process::id()));
+        std::fs::remove_dir_all(&root).ok();
+        std::fs::create_dir_all(root.join("proj/files")).unwrap();
+        std::fs::create_dir_all(root.join("proj/assets")).unwrap();
+        std::fs::write(root.join("proj/files/spec.docx"), "x").unwrap();
+        std::fs::write(root.join("proj/assets/shot.png"), "x").unwrap();
+        std::fs::write(root.join("proj/keep.md"), "nothing linked\n").unwrap();
+        std::fs::write(
+            root.join("proj/n.md"),
+            "[s](files/spec.docx) ![p](assets/shot.png) [other](keep.md)\n",
+        )
+        .unwrap();
+
+        let r = super::delete_note_in(&root, "assets", "proj/n.md", true).unwrap();
+        // The linked note is never collateral.
+        assert!(root.join("proj/keep.md").is_file());
+        assert_eq!(
+            r.deleted_assets,
+            vec!["proj/files/spec.docx", "proj/assets/shot.png"],
+        );
+        // assets/ went on its own; files/ is offered; proj/ still holds keep.md.
+        assert!(!root.join("proj/assets").exists());
+        assert_eq!(r.empty_dirs, vec!["proj/files"]);
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
     #[test]
     fn links_and_empty_dirs() {
         let root = std::env::temp_dir().join(format!("jkn-del-{}", std::process::id()));
@@ -842,6 +1011,7 @@ fn has_scheme(s: &str) -> bool {
 // cleanup; deleting a whole note passes None and covers every linked file.
 // Returns the deleted vault-relative paths and the folders they came out of.
 fn delete_orphans(
+    root: &Path,
     note_dir: &str,
     rels: Vec<String>,
     restrict_to: Option<&str>,
@@ -849,38 +1019,21 @@ fn delete_orphans(
     let mut deleted = Vec::new();
     let mut dirs: Vec<PathBuf> = Vec::new();
     for rel in rels {
-        // Notes are never collateral, and neither is anything with a scheme.
-        if rel.contains("..") || has_scheme(&rel) || rel.ends_with(".md") {
-            continue;
-        }
         if let Some(dir) = restrict_to {
             if !rel.starts_with(&format!("{dir}/")) {
                 continue;
             }
         }
-        let name = match Path::new(&rel).file_name() {
-            Some(n) => n.to_string_lossy().to_string(),
-            None => continue,
-        };
-        let vault_rel = match (note_dir.is_empty(), rel.starts_with('/')) {
-            (_, true) => rel.trim_start_matches('/').to_string(),
-            (true, false) => rel.clone(),
-            (false, false) => format!("{note_dir}/{rel}"),
-        };
-        let abs = match resolve(&vault_rel) {
+        let Some((vault_rel, name)) = attachment_of(note_dir, &rel) else { continue };
+        let abs = match resolve_in(root, &vault_rel) {
             Ok(p) => p,
             Err(_) => continue,
         };
         if !abs.is_file() {
             continue;
         }
-        // Still referenced anywhere (including this note, if it came back)? Keep it.
-        let hits = proc("rg")
-            .current_dir(vault())
-            .args(["--files-with-matches", "--fixed-strings", "-g", "*.md", &name])
-            .output()
-            .map_err(|e| format!("rg failed: {e}"))?;
-        if !String::from_utf8_lossy(&hits.stdout).trim().is_empty() {
+        // Still referenced by some other note? Keep it.
+        if referenced_by_note(root, &name) {
             continue;
         }
         std::fs::remove_file(&abs).map_err(|e| e.to_string())?;
@@ -894,13 +1047,57 @@ fn delete_orphans(
     Ok((deleted, dirs))
 }
 
+// A link target that could be an attachment: local, not a note. Returns its
+// vault-relative path and filename.
+fn attachment_of(note_dir: &str, link: &str) -> Option<(String, String)> {
+    if link.contains("..") || has_scheme(link) || link.ends_with(".md") {
+        return None;
+    }
+    let name = Path::new(link).file_name()?.to_string_lossy().to_string();
+    let vault_rel = match (note_dir.is_empty(), link.starts_with('/')) {
+        (_, true) => link.trim_start_matches('/').to_string(),
+        (true, false) => link.to_string(),
+        (false, false) => format!("{note_dir}/{link}"),
+    };
+    Some((vault_rel, name))
+}
+
+// Does any note in the vault still mention this filename? Reading the notes in
+// process (instead of shelling out to rg) keeps this testable and means the
+// result can't hinge on rg's globbing.
+fn referenced_by_note(root: &Path, name: &str) -> bool {
+    md_files(root).iter().any(|p| {
+        std::fs::read_to_string(p)
+            .map(|t| t.contains(name))
+            .unwrap_or(false)
+    })
+}
+
+fn md_files(dir: &Path) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    for e in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+        let p = e.path();
+        let name = e.file_name().to_string_lossy().to_string();
+        if name.starts_with('.') {
+            continue;
+        }
+        if p.is_dir() {
+            out.extend(md_files(&p));
+        } else if name.ends_with(".md") {
+            out.push(p);
+        }
+    }
+    out
+}
+
 // On-save cleanup: an attachment whose link the user removed. Confined to the
 // note's attachments folder — auto-deleting arbitrary linked files on every
 // keystroke-triggered save would be far too eager.
 #[tauri::command]
 fn prune_attachments(note: String, removed: Vec<String>) -> Result<Vec<String>, String> {
     let r = resolved();
-    let (deleted, dirs) = delete_orphans(&note_dir_of(&note), removed, Some(&r.attachments_dir))?;
+    let (deleted, dirs) =
+        delete_orphans(&vault(), &note_dir_of(&note), removed, Some(&r.attachments_dir))?;
     for d in dirs {
         remove_if_empty(&d);
     }
@@ -1165,7 +1362,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             read_tree, grep, read_note, write_note, move_note, run_note,
-            delete_note, git_status, git_sync, list_tasks, toggle_task, check_env, detect_config, attach_file, read_asset, open_external, prune_attachments, delete_dir,
+            delete_note, git_status, git_sync, list_tasks, toggle_task, check_env, detect_config, attach_file, read_asset, open_external, prune_attachments, delete_dir, delete_plan,
             set_vault, get_config, save_config
         ])
         .run(tauri::generate_context!())

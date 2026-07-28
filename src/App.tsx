@@ -26,6 +26,7 @@ import {
   moveNote,
   deleteNote,
   deleteDir,
+  deletePlan,
   runNote,
   attachFile,
   readAsset,
@@ -234,12 +235,14 @@ export default function App() {
 
   const onDelete = async () => {
     if (!open || !cfg || !confirm(`Delete ${open}?`)) return;
-    // Linked local files are offered separately — they may be worth keeping, and
-    // anything another note references is kept regardless. Notes are never
-    // collateral, only attachments.
-    const assets = linkTargets(body).filter(
-      (t) => !/^[a-z][a-z0-9+-]*:/i.test(t) && !t.endsWith(".md"),
-    );
+    // The backend reads the note off disk and lists only what it would actually
+    // remove (skipping files other notes still reference).
+    let assets: string[] = [];
+    try {
+      assets = await deletePlan(open);
+    } catch (e) {
+      console.error("delete_plan failed:", e);
+    }
     const withAssets =
       assets.length > 0 &&
       confirm(
@@ -564,6 +567,25 @@ function Spinner() {
   );
 }
 
+// Paperclip marker for folders whose attachments the tree hides.
+function Clip() {
+  return (
+    <svg
+      className="has-assets"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <title>Contains attachments (hidden here)</title>
+      <path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48" />
+    </svg>
+  );
+}
+
 function Tree({
   entries,
   open,
@@ -602,11 +624,7 @@ function Tree({
               onClick={() => toggle(e.path)}
             >
               <span className="chev">{collapsed.has(e.path) ? "▸" : "▾"}</span> {e.name}
-              {e.has_assets && (
-                <span className="has-assets" title="Contains an assets folder">
-                  📎
-                </span>
-              )}
+              {e.has_assets && <Clip />}
             </div>
           ) : (
             <div

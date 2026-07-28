@@ -18,6 +18,8 @@
   --serif: "Instrument Serif", Georgia, "Times New Roman", serif;
   --mono: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, monospace;
 
+  --doc-icon: url('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="black" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>');
+
   --r: 7px;
   --t: 0.13s ease;
 }
@@ -98,7 +100,15 @@ button { font: inherit; color: inherit; }
 }
 .tree-dir:hover { color: var(--text); }
 .tree-dir .chev { display: inline-block; width: 11px; color: var(--accent); }
-.has-assets { margin-left: 5px; font-size: 10px; opacity: 0.7; cursor: help; }
+.has-assets {
+  width: 11px;
+  height: 11px;
+  margin-left: 5px;
+  vertical-align: -1px;
+  color: var(--muted);
+  cursor: help;
+}
+.tree-dir:hover .has-assets { color: var(--accent); }
 .tree-file {
   padding: 4px 8px;
   margin: 0 6px;
@@ -252,7 +262,18 @@ input, textarea { accent-color: var(--accent); }
 
 /* Any link that isn't a note or a URL is a file attachment: one generic glyph,
    the link text carries name.ext. */
-.markdown a.ext:not([href^="http"])::before { content: "📄 "; }
+.markdown a.ext:not([href^="http"])::before {
+  content: "";
+  display: inline-block;
+  width: 0.85em;
+  height: 0.85em;
+  margin-right: 0.35em;
+  vertical-align: -0.08em;
+  background: currentColor;
+  /* Document outline, masked so it takes the link colour. */
+  -webkit-mask: var(--doc-icon) center / contain no-repeat;
+  mask: var(--doc-icon) center / contain no-repeat;
+}
 .markdown a.ext { text-decoration-color: var(--accent-line); }
 
 /* Drop target feedback while dragging files over the window. */

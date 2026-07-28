@@ -33,6 +33,8 @@ export const writeNote = (rel: string, body: string) =>
 export const moveNote = (from: string, to: string) =>
   invoke<void>("move_note", { from, to });
 export type DeleteResult = { deleted_assets: string[]; empty_dirs: string[] };
+// Files that deleting this note would take with it (read off disk, not the editor).
+export const deletePlan = (rel: string) => invoke<string[]>("delete_plan", { rel });
 export const deleteNote = (rel: string, withAssets: boolean) =>
   invoke<DeleteResult>("delete_note", { rel, withAssets });
 // Removes a folder only if it is empty.
